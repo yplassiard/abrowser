@@ -1,0 +1,27 @@
+[package]
+name = "abrowser"
+version = "0.1.0"
+edition = "2021"
+description = "Accessible terminal browser with screen reader and braille support"
+license = "MIT"
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+tokio-tungstenite = "0.21"
+futures-util = "0.3"
+url = "2.5"
+crossterm = "0.28"
+toml = "0.8"
+dirs = "5.0"
+
+[[bin]]
+name = "abrowser"
+path = "src/main.rs"
+
+[lib]
+name = "abrowser"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]

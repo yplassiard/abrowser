@@ -28,3 +28,18 @@ index 133ae3086a..278abd2a81 100644
  #elif BUILDFLAG(IS_ANDROID)
  #include <android/api-level.h>
  #endif
+diff --git a/third_party/crashpad/crashpad/util/mach/exception_types.cc b/third_party/crashpad/crashpad/util/mach/exception_types.cc
+index c050b28560..5165e77f42 100644
+--- a/third_party/crashpad/crashpad/util/mach/exception_types.cc
++++ b/third_party/crashpad/crashpad/util/mach/exception_types.cc
+@@ -15,6 +15,10 @@
+ #include "util/mach/exception_types.h"
+ 
+ #include <Availability.h>
++// Workaround for newer macOS SDKs where __ENVIRONMENT_OS_VERSION_MIN_REQUIRED__ is undefined
++#ifndef __ENVIRONMENT_OS_VERSION_MIN_REQUIRED__
++#define __ENVIRONMENT_OS_VERSION_MIN_REQUIRED__ 101300
++#endif
+ #include <dlfcn.h>
+ #include <errno.h>
+ #include <kern/exc_resource.h>

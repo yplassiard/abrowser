@@ -83,9 +83,7 @@ get_depot_tools() {
     echo "=== Step 1: Getting depot_tools ==="
 
     if [ -d "$DEPOT_TOOLS_DIR" ]; then
-        echo "depot_tools already exists, updating..."
-        cd "$DEPOT_TOOLS_DIR"
-        git pull --quiet
+        echo "depot_tools already exists, skipping"
     else
         echo "Cloning depot_tools..."
         git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_DIR"
@@ -101,6 +99,12 @@ get_depot_tools() {
 # =============================================================================
 get_chromium() {
     echo "=== Step 2: Getting Chromium sources ==="
+
+    if [ -d "$CHROMIUM_SRC" ]; then
+        echo "Chromium sources already exist, skipping"
+        echo ""
+        return
+    fi
 
     mkdir -p "$CHROMIUM_DIR"
     cd "$CHROMIUM_DIR"
@@ -120,17 +124,8 @@ solutions = [
 EOF
     fi
 
-    if [ ! -d "src" ]; then
-        echo "Fetching Chromium (this may take a while)..."
-        gclient sync --no-history --shallow
-    else
-        echo "Chromium sources already exist"
-        # Check version
-        cd src
-        CURRENT_VERSION=$(git describe --tags --always 2>/dev/null || echo "unknown")
-        echo "Current version: $CURRENT_VERSION"
-        cd ..
-    fi
+    echo "Fetching Chromium (this may take a while)..."
+    gclient sync --no-history --shallow
 
     echo "Chromium sources OK"
     echo ""

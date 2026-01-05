@@ -270,6 +270,7 @@ use_glib=true
 use_gnome_keyring=false
 use_qt=false
 use_system_libdrm=true
+extra_cxxflags=\"-Wno-error=implicit-fallthrough -Wno-implicit-fallthrough\"
 "
     fi
 

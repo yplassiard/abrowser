@@ -71,7 +71,7 @@ install_dependencies() {
                 libxss-dev libxtst-dev \
                 libpulse-dev libudev-dev \
                 libva-dev libcurl4-openssl-dev \
-                libx11-dev libxcb1-dev
+                libx11-dev libxcb1-dev libpci-dev
         else
             echo "Unsupported Linux distribution. Please install dependencies manually."
             exit 1

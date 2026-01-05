@@ -261,6 +261,7 @@ angle_enable_swiftshader=false
 enable_swiftshader_vulkan=false
 angle_enable_vulkan=false
 use_dawn=false
+use_crashpad=false
 "
     elif [ "$OS" = "Linux" ]; then
         GN_ARGS+="

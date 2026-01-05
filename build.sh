@@ -66,7 +66,8 @@ install_dependencies() {
                 libcairo2-dev libfontconfig1-dev \
                 libsecret-1-dev \
                 libxss-dev libxtst-dev \
-                libpulse-dev libudev-dev
+                libpulse-dev libudev-dev \
+                libva-dev
         else
             echo "Unsupported Linux distribution. Please install dependencies manually."
             exit 1

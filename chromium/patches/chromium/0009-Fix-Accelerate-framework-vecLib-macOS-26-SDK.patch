@@ -1,0 +1,77 @@
+diff --git a/third_party/blink/renderer/platform/audio/biquad.cc b/third_party/blink/renderer/platform/audio/biquad.cc
+index 032b9fc736..6629213860 100644
+--- a/third_party/blink/renderer/platform/audio/biquad.cc
++++ b/third_party/blink/renderer/platform/audio/biquad.cc
+@@ -38,7 +38,14 @@
+ #include <algorithm>
+ #include <complex>
+ #if BUILDFLAG(IS_MAC)
++// Workaround for macOS 26 SDK vecLib headers compatibility
++#ifndef __builtin_verbose_trap
++#define __builtin_verbose_trap(reason, ...) __builtin_trap()
++#endif
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wunrecognized-platform-name"
+ #include <Accelerate/Accelerate.h>
++#pragma clang diagnostic pop
+ #endif
+ 
+ namespace blink {
+diff --git a/third_party/blink/renderer/platform/audio/direct_convolver.cc b/third_party/blink/renderer/platform/audio/direct_convolver.cc
+index a9553f43ba..4b6ccba7c9 100644
+--- a/third_party/blink/renderer/platform/audio/direct_convolver.cc
++++ b/third_party/blink/renderer/platform/audio/direct_convolver.cc
+@@ -34,7 +34,14 @@
+ #include "third_party/blink/renderer/platform/audio/vector_math.h"
+ 
+ #if BUILDFLAG(IS_MAC)
++// Workaround for macOS 26 SDK vecLib headers compatibility
++#ifndef __builtin_verbose_trap
++#define __builtin_verbose_trap(reason, ...) __builtin_trap()
++#endif
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wunrecognized-platform-name"
+ #include <Accelerate/Accelerate.h>
++#pragma clang diagnostic pop
+ #endif
+ 
+ #if defined(ARCH_CPU_X86_FAMILY) && !BUILDFLAG(IS_MAC)
+diff --git a/third_party/blink/renderer/platform/audio/fft_frame.h b/third_party/blink/renderer/platform/audio/fft_frame.h
+index f9c9571bf1..b113a3a623 100644
+--- a/third_party/blink/renderer/platform/audio/fft_frame.h
++++ b/third_party/blink/renderer/platform/audio/fft_frame.h
+@@ -43,7 +43,15 @@ struct RDFTContext;
+ #include "third_party/blink/renderer/platform/wtf/hash_map.h"
+ #include "third_party/pffft/src/pffft.h"
+ #elif BUILDFLAG(IS_MAC)
++// Workaround for macOS 26 SDK vecLib headers using __builtin_verbose_trap
++// and visionOS platform which Chromium's clang doesn't support
++#ifndef __builtin_verbose_trap
++#define __builtin_verbose_trap(reason, ...) __builtin_trap()
++#endif
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wunrecognized-platform-name"
+ #include <Accelerate/Accelerate.h>
++#pragma clang diagnostic pop
+ #endif
+ 
+ namespace blink {
+diff --git a/third_party/blink/renderer/platform/audio/mac/vector_math_mac.h b/third_party/blink/renderer/platform/audio/mac/vector_math_mac.h
+index 761b58afb5..21cfff2fc8 100644
+--- a/third_party/blink/renderer/platform/audio/mac/vector_math_mac.h
++++ b/third_party/blink/renderer/platform/audio/mac/vector_math_mac.h
+@@ -5,7 +5,14 @@
+ #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_AUDIO_MAC_VECTOR_MATH_MAC_H_
+ #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_AUDIO_MAC_VECTOR_MATH_MAC_H_
+ 
++// Workaround for macOS 26 SDK vecLib headers compatibility
++#ifndef __builtin_verbose_trap
++#define __builtin_verbose_trap(reason, ...) __builtin_trap()
++#endif
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wunrecognized-platform-name"
+ #include <Accelerate/Accelerate.h>
++#pragma clang diagnostic pop
+ 
+ #include "build/build_config.h"
+ #include "third_party/blink/renderer/platform/audio/audio_array.h"

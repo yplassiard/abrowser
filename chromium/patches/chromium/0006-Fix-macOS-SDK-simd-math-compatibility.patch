@@ -59,3 +59,63 @@ index b3ed229c76..ab5a0f2375 100644
  #include <simd/simd.h>
  
  namespace gfx {
+diff --git a/services/shape_detection/detection_utils_mac.h b/services/shape_detection/detection_utils_mac.h
+index 5764d368b2..7b8d2b745d 100644
+--- a/services/shape_detection/detection_utils_mac.h
++++ b/services/shape_detection/detection_utils_mac.h
+@@ -5,6 +5,15 @@
+ #ifndef SERVICES_SHAPE_DETECTION_DETECTION_UTILS_MAC_H_
+ #define SERVICES_SHAPE_DETECTION_DETECTION_UTILS_MAC_H_
+ 
++// Workaround for newer macOS SDKs missing __sincospif/__sincospi
++#include <math.h>
++#ifndef __sincospif
++#define __sincospif(x, sinp, cosp) __sincosf((x) * M_PI, sinp, cosp)
++#endif
++#ifndef __sincospi
++#define __sincospi(x, sinp, cosp) __sincos((x) * M_PI, sinp, cosp)
++#endif
++
+ #import <CoreImage/CoreImage.h>
+ #import <Foundation/Foundation.h>
+ #import <Vision/Vision.h>
+diff --git a/services/shape_detection/barcode_detection_impl_mac_vision_api.h b/services/shape_detection/barcode_detection_impl_mac_vision_api.h
+index 47eee4f84a..c71abc5785 100644
+--- a/services/shape_detection/barcode_detection_impl_mac_vision_api.h
++++ b/services/shape_detection/barcode_detection_impl_mac_vision_api.h
+@@ -5,6 +5,15 @@
+ #ifndef SERVICES_SHAPE_DETECTION_BARCODE_DETECTION_IMPL_MAC_VISION_API_H_
+ #define SERVICES_SHAPE_DETECTION_BARCODE_DETECTION_IMPL_MAC_VISION_API_H_
+ 
++// Workaround for newer macOS SDKs missing __sincospif/__sincospi
++#include <math.h>
++#ifndef __sincospif
++#define __sincospif(x, sinp, cosp) __sincosf((x) * M_PI, sinp, cosp)
++#endif
++#ifndef __sincospi
++#define __sincospi(x, sinp, cosp) __sincos((x) * M_PI, sinp, cosp)
++#endif
++
+ #ifdef __OBJC__
+ 
+ #import <Foundation/Foundation.h>
+diff --git a/services/shape_detection/detection_utils_mac.h b/services/shape_detection/detection_utils_mac.h
+index 5764d368b2..7b8d2b745d 100644
+--- a/services/shape_detection/detection_utils_mac.h
++++ b/services/shape_detection/detection_utils_mac.h
+@@ -5,6 +5,15 @@
+ #ifndef SERVICES_SHAPE_DETECTION_DETECTION_UTILS_MAC_H_
+ #define SERVICES_SHAPE_DETECTION_DETECTION_UTILS_MAC_H_
+ 
++// Workaround for newer macOS SDKs missing __sincospif/__sincospi
++#include <math.h>
++#ifndef __sincospif
++#define __sincospif(x, sinp, cosp) __sincosf((x) * M_PI, sinp, cosp)
++#endif
++#ifndef __sincospi
++#define __sincospi(x, sinp, cosp) __sincos((x) * M_PI, sinp, cosp)
++#endif
++
+ #import <CoreImage/CoreImage.h>
+ #import <Foundation/Foundation.h>
+ #import <Vision/Vision.h>

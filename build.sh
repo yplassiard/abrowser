@@ -258,6 +258,9 @@ treat_warnings_as_errors=false
         GN_ARGS+="
 enable_swiftshader=false
 angle_enable_swiftshader=false
+enable_swiftshader_vulkan=false
+angle_enable_vulkan=false
+use_dawn=false
 "
     elif [ "$OS" = "Linux" ]; then
         GN_ARGS+="

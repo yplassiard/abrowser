@@ -14,6 +14,9 @@ DEPOT_TOOLS_DIR="$SCRIPT_DIR/depot_tools"
 # Chromium version to build against
 CHROMIUM_VERSION="120.0.6099.224"
 
+# abrowser version
+ABROWSER_VERSION="0.1.0"
+
 # Detect OS
 OS=$(uname -s)
 ARCH=$(uname -m)
@@ -279,6 +282,117 @@ build_chromium() {
 }
 
 # =============================================================================
+# Step 7: Create distribution package
+# =============================================================================
+create_package() {
+    echo "=== Step 7: Creating distribution package ==="
+
+    DIST_DIR="$SCRIPT_DIR/dist"
+    mkdir -p "$DIST_DIR"
+
+    if [ "$OS" = "Darwin" ]; then
+        # macOS - create .dmg
+        PKG_NAME="abrowser-${ABROWSER_VERSION}-macos-${ARCH}"
+        APP_DIR="$DIST_DIR/$PKG_NAME"
+
+        rm -rf "$APP_DIR"
+        mkdir -p "$APP_DIR"
+
+        # Copy binary and required files
+        cp "$CHROMIUM_SRC/out/Release/headless_shell" "$APP_DIR/abrowser"
+
+        # Copy required frameworks/dylibs
+        if [ -d "$CHROMIUM_SRC/out/Release/Frameworks" ]; then
+            cp -R "$CHROMIUM_SRC/out/Release/Frameworks" "$APP_DIR/"
+        fi
+
+        # Copy v8 snapshots if present
+        for f in "$CHROMIUM_SRC/out/Release"/*.bin; do
+            [ -f "$f" ] && cp "$f" "$APP_DIR/"
+        done
+
+        # Copy pak files
+        for f in "$CHROMIUM_SRC/out/Release"/*.pak; do
+            [ -f "$f" ] && cp "$f" "$APP_DIR/"
+        done
+
+        # Create DMG
+        DMG_PATH="$DIST_DIR/${PKG_NAME}.dmg"
+        rm -f "$DMG_PATH"
+        hdiutil create -volname "abrowser" -srcfolder "$APP_DIR" -ov -format UDZO "$DMG_PATH"
+
+        rm -rf "$APP_DIR"
+        echo "Package created: $DMG_PATH"
+
+    elif [ "$OS" = "Linux" ]; then
+        # Linux - create .deb
+        PKG_NAME="abrowser-${ABROWSER_VERSION}-linux-${ARCH}"
+        DEB_DIR="$DIST_DIR/${PKG_NAME}"
+
+        rm -rf "$DEB_DIR"
+        mkdir -p "$DEB_DIR/DEBIAN"
+        mkdir -p "$DEB_DIR/usr/bin"
+        mkdir -p "$DEB_DIR/usr/lib/abrowser"
+        mkdir -p "$DEB_DIR/usr/share/applications"
+
+        # Control file
+        cat > "$DEB_DIR/DEBIAN/control" << EOF
+Package: abrowser
+Version: ${ABROWSER_VERSION}
+Section: web
+Priority: optional
+Architecture: $(dpkg --print-architecture)
+Depends: libnss3, libatk1.0-0, libatk-bridge2.0-0, libcups2, libdrm2, libxkbcommon0, libxcomposite1, libxdamage1, libxrandr2, libgbm1, libasound2, libpango-1.0-0, libcairo2, libsecret-1-0
+Maintainer: abrowser
+Description: Accessible terminal web browser
+ A terminal-based accessible web browser built on Chromium headless.
+EOF
+
+        # Copy binary
+        cp "$CHROMIUM_SRC/out/Release/headless_shell" "$DEB_DIR/usr/lib/abrowser/abrowser"
+        chmod 755 "$DEB_DIR/usr/lib/abrowser/abrowser"
+
+        # Copy required files
+        for f in "$CHROMIUM_SRC/out/Release"/*.bin; do
+            [ -f "$f" ] && cp "$f" "$DEB_DIR/usr/lib/abrowser/"
+        done
+        for f in "$CHROMIUM_SRC/out/Release"/*.pak; do
+            [ -f "$f" ] && cp "$f" "$DEB_DIR/usr/lib/abrowser/"
+        done
+        if [ -d "$CHROMIUM_SRC/out/Release/locales" ]; then
+            cp -R "$CHROMIUM_SRC/out/Release/locales" "$DEB_DIR/usr/lib/abrowser/"
+        fi
+
+        # Create wrapper script
+        cat > "$DEB_DIR/usr/bin/abrowser" << 'EOF'
+#!/bin/bash
+exec /usr/lib/abrowser/abrowser "$@"
+EOF
+        chmod 755 "$DEB_DIR/usr/bin/abrowser"
+
+        # Desktop file
+        cat > "$DEB_DIR/usr/share/applications/abrowser.desktop" << EOF
+[Desktop Entry]
+Name=abrowser
+Comment=Accessible terminal web browser
+Exec=abrowser %U
+Terminal=true
+Type=Application
+Categories=Network;WebBrowser;
+EOF
+
+        # Build deb
+        DEB_PATH="$DIST_DIR/${PKG_NAME}.deb"
+        dpkg-deb --build "$DEB_DIR" "$DEB_PATH"
+
+        rm -rf "$DEB_DIR"
+        echo "Package created: $DEB_PATH"
+    fi
+
+    echo ""
+}
+
+# =============================================================================
 # Main
 # =============================================================================
 
@@ -286,6 +400,7 @@ build_chromium() {
 SKIP_DEPS=false
 SKIP_FETCH=false
 SKIP_RUST=false
+SKIP_PACKAGE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -301,6 +416,10 @@ while [[ $# -gt 0 ]]; do
             SKIP_RUST=true
             shift
             ;;
+        --skip-package)
+            SKIP_PACKAGE=true
+            shift
+            ;;
         --help)
             echo "Usage: $0 [options]"
             echo ""
@@ -308,6 +427,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --skip-deps    Skip dependency installation"
             echo "  --skip-fetch   Skip Chromium fetch (use existing sources)"
             echo "  --skip-rust    Skip Rust library build"
+            echo "  --skip-package Skip distribution package creation"
             echo "  --help         Show this help"
             exit 0
             ;;
@@ -337,3 +457,7 @@ fi
 
 generate_build
 build_chromium
+
+if [ "$SKIP_PACKAGE" = false ]; then
+    create_package
+fi

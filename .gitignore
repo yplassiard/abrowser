@@ -1,6 +1,7 @@
 # Build artifacts
 /target/
 /build/
+/dist/
 
 # Chromium source (fetched separately, but keep patches)
 /chromium/src/

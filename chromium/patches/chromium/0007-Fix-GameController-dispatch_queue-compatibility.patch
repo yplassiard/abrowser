@@ -1,0 +1,16 @@
+diff --git a/device/gamepad/game_controller_data_fetcher_mac.mm b/device/gamepad/game_controller_data_fetcher_mac.mm
+index ef204e0aa7..10ab0a1a90 100644
+--- a/device/gamepad/game_controller_data_fetcher_mac.mm
++++ b/device/gamepad/game_controller_data_fetcher_mac.mm
+@@ -4,6 +4,11 @@
+ 
+ #include "device/gamepad/game_controller_data_fetcher_mac.h"
+ 
++// Workaround for macOS SDK compatibility with dispatch_queue_t as ObjC object
++#ifndef OS_OBJECT_USE_OBJC
++#define OS_OBJECT_USE_OBJC 1
++#endif
++
+ #import <GameController/GameController.h>
+ #include <string.h>
+ 

@@ -245,6 +245,7 @@ treat_warnings_as_errors=false
 use_sysroot=false
 use_glib=true
 use_gnome_keyring=false
+use_qt=false
 "
     fi
 

@@ -60,7 +60,7 @@ install_dependencies() {
                 pkg-config \
                 libglib2.0-dev libgtk-3-dev \
                 libnss3-dev libatk1.0-dev libatk-bridge2.0-dev \
-                libcups2-dev libdrm-dev libxkbcommon-dev \
+                libcups2-dev libdrm-dev libdrm2 mesa-common-dev libxkbcommon-dev \
                 libxcomposite-dev libxdamage-dev libxrandr-dev \
                 libgbm-dev libasound2-dev libpango1.0-dev \
                 libcairo2-dev libfontconfig1-dev \
@@ -246,6 +246,7 @@ use_sysroot=false
 use_glib=true
 use_gnome_keyring=false
 use_qt=false
+use_system_libdrm=true
 "
     fi
 

@@ -64,7 +64,7 @@ install_dependencies() {
                 libxcomposite-dev libxdamage-dev libxrandr-dev \
                 libgbm-dev libasound2-dev libpango1.0-dev \
                 libcairo2-dev libfontconfig1-dev \
-                libgnome-keyring-dev libsecret-1-dev \
+                libsecret-1-dev \
                 libxss-dev libxtst-dev \
                 libpulse-dev libudev-dev
         else
@@ -244,6 +244,7 @@ treat_warnings_as_errors=false
         GN_ARGS+="
 use_sysroot=false
 use_glib=true
+use_gnome_keyring=false
 "
     fi
 

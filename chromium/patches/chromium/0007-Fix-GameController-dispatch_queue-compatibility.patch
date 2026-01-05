@@ -1,16 +1,18 @@
 diff --git a/device/gamepad/game_controller_data_fetcher_mac.mm b/device/gamepad/game_controller_data_fetcher_mac.mm
-index ef204e0aa7..10ab0a1a90 100644
+index ef204e0aa7..7d900a7668 100644
 --- a/device/gamepad/game_controller_data_fetcher_mac.mm
 +++ b/device/gamepad/game_controller_data_fetcher_mac.mm
-@@ -4,6 +4,11 @@
+@@ -2,6 +2,13 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
  
- #include "device/gamepad/game_controller_data_fetcher_mac.h"
- 
-+// Workaround for macOS SDK compatibility with dispatch_queue_t as ObjC object
++// Workaround for macOS SDK compatibility with dispatch_queue_t as ObjC object.
++// Must be defined BEFORE any includes to ensure dispatch types are treated as
++// Objective-C objects, which allows 'strong' property attribute to work.
 +#ifndef OS_OBJECT_USE_OBJC
 +#define OS_OBJECT_USE_OBJC 1
 +#endif
 +
- #import <GameController/GameController.h>
- #include <string.h>
+ #include "device/gamepad/game_controller_data_fetcher_mac.h"
  
+ #import <GameController/GameController.h>

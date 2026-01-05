@@ -1,0 +1,30 @@
+diff --git a/third_party/crashpad/crashpad/client/crashpad_client_mac.cc b/third_party/crashpad/crashpad/client/crashpad_client_mac.cc
+index 4634f9a8fc..a103f34963 100644
+--- a/third_party/crashpad/crashpad/client/crashpad_client_mac.cc
++++ b/third_party/crashpad/crashpad/client/crashpad_client_mac.cc
+@@ -15,6 +15,10 @@
+ #include "client/crashpad_client.h"
+ 
+ #include <Availability.h>
++// Workaround for newer macOS SDKs where __ENVIRONMENT_OS_VERSION_MIN_REQUIRED__ is undefined
++#ifndef __MAC_OS_X_VERSION_MIN_REQUIRED
++#define __MAC_OS_X_VERSION_MIN_REQUIRED 101300
++#endif
+ #include <errno.h>
+ #include <mach/mach.h>
+ #include <pthread.h>
+diff --git a/third_party/crashpad/crashpad/minidump/minidump_misc_info_writer.cc b/third_party/crashpad/crashpad/minidump/minidump_misc_info_writer.cc
+index 133ae3086a..b01af9ab99 100644
+--- a/third_party/crashpad/crashpad/minidump/minidump_misc_info_writer.cc
++++ b/third_party/crashpad/crashpad/minidump/minidump_misc_info_writer.cc
+@@ -36,6 +36,10 @@
+ 
+ #if BUILDFLAG(IS_MAC)
+ #include <Availability.h>
++// Workaround for newer macOS SDKs where __ENVIRONMENT_OS_VERSION_MIN_REQUIRED__ is undefined
++#ifndef __MAC_OS_X_VERSION_MIN_REQUIRED
++#define __MAC_OS_X_VERSION_MIN_REQUIRED 101300
++#endif
+ #elif BUILDFLAG(IS_ANDROID)
+ #include <android/api-level.h>
+ #endif

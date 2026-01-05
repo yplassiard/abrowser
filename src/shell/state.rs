@@ -1,6 +1,10 @@
 //! Browser state management
 
-use crate::cdp::{AXNode, AXTree, CdpClient};
+use std::sync::Arc;
+use crate::accessibility::{AXNode, AXTree};
+use crate::backend::PageSession;
+// TODO: Remove CdpClient import when Phase 4 migration is complete
+use crate::cdp::CdpClient;
 use super::config::ViewportMode;
 use super::media::MediaStatus;
 
@@ -24,6 +28,9 @@ pub struct HistoryEntry {
 pub struct Tab {
     pub url: String,
     pub title: String,
+    /// Page session (backend-agnostic interface) - Arc for sharing with background tasks
+    pub session: Option<Arc<dyn PageSession>>,
+    /// Legacy CDP client (TODO: remove in Phase 6)
     pub page_client: Option<CdpClient>,
     tree: Option<AXTree>,
     nodes: Vec<NodeRef>,
@@ -55,7 +62,7 @@ struct NodeRef {
     node_id: String,
     role: String,
     name: String,
-    backend_dom_node_id: Option<i64>,
+    has_handle: bool,
 }
 
 impl Tab {
@@ -63,6 +70,7 @@ impl Tab {
         Self {
             url: String::new(),
             title: "New Tab".to_string(),
+            session: None,
             page_client: None,
             tree: None,
             nodes: Vec::new(),
@@ -170,10 +178,10 @@ impl Tab {
             .linearize()
             .iter()
             .map(|n| NodeRef {
-                node_id: n.node_id.clone(),
-                role: n.role_str().to_string(),
-                name: n.name_str().to_string(),
-                backend_dom_node_id: n.backend_dom_node_id,
+                node_id: n.id.clone(),
+                role: format!("{:?}", n.role),
+                name: n.name.clone(),
+                has_handle: n.handle.is_some(),
             })
             .collect();
         self.tree = Some(tree);
@@ -244,7 +252,12 @@ impl Tab {
             "radiobutton" => vec!["radiobutton", "RadioButton", "radio"],
             "list" => vec!["list", "List", "listbox", "ListBox"],
             "table" => vec!["table", "Table"],
-            "textbox" => vec!["textbox", "TextField", "textarea", "TextArea"],
+            "textbox" => vec![
+                "textbox", "TextField", "textarea", "TextArea",
+                "searchbox", "SearchBox", "spinbutton", "SpinButton",
+                "editabletext", "EditableText",
+            ],
+            "combobox" => vec!["combobox", "ComboBox", "listbox", "ListBox"],
             _ => vec![],
         }
     }
@@ -404,6 +417,8 @@ pub struct BrowserState {
     pub media_status: Option<MediaStatus>,
     pub search_pattern: String,
     pub search_forward: bool,
+    /// Whether the screen needs to be redrawn
+    pub needs_render: bool,
 }
 
 impl BrowserState {
@@ -421,7 +436,18 @@ impl BrowserState {
             media_status: None,
             search_pattern: String::new(),
             search_forward: true,
+            needs_render: true, // Initial render needed
         }
+    }
+
+    /// Mark that the screen needs to be redrawn
+    pub fn mark_dirty(&mut self) {
+        self.needs_render = true;
+    }
+
+    /// Clear the dirty flag after rendering
+    pub fn clear_dirty(&mut self) {
+        self.needs_render = false;
     }
 
     pub fn with_viewport(mut self, mode: ViewportMode) -> Self {

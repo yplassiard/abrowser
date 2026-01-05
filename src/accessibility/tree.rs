@@ -1,22 +1,22 @@
 //! Accessibility tree management.
 //!
-//! Stores and manages the accessibility tree received from Chromium.
+//! Stores and manages the accessibility tree received from the browser backend.
 
 use std::collections::HashMap;
 
-use super::AXNode;
+use super::{AXNode, Role};
 
 /// The accessibility tree for a document
 #[derive(Debug, Default)]
 pub struct AXTree {
     /// All nodes indexed by ID
-    nodes: HashMap<i32, AXNode>,
+    nodes: HashMap<String, AXNode>,
 
     /// Root node ID
-    root_id: Option<i32>,
+    root_id: Option<String>,
 
     /// Currently focused node ID
-    focus_id: Option<i32>,
+    focus_id: Option<String>,
 }
 
 impl AXTree {
@@ -25,41 +25,73 @@ impl AXTree {
     }
 
     /// Update the tree with new nodes
-    pub fn update(&mut self, nodes: Vec<AXNode>, root_id: i32) {
+    pub fn update(&mut self, nodes: Vec<AXNode>, root_id: impl Into<String>) {
         self.nodes.clear();
-        self.root_id = Some(root_id);
+        self.root_id = Some(root_id.into());
 
         for node in nodes {
-            self.nodes.insert(node.id, node);
+            self.nodes.insert(node.id.clone(), node);
+        }
+
+        // Populate contains_role for nodes that contain interactive children
+        self.populate_contained_roles();
+    }
+
+    /// Find headings that contain interactive elements and set their contains_role
+    fn populate_contained_roles(&mut self) {
+        // Collect IDs and names of headings
+        let headings: Vec<(String, String)> = self
+            .nodes
+            .values()
+            .filter(|n| matches!(n.role, Role::Heading))
+            .map(|n| (n.id.clone(), n.name.clone()))
+            .collect();
+
+        // For each heading, check and collect results
+        let mut updates: Vec<(String, Role)> = Vec::new();
+        for (id, name) in &headings {
+            if let Some(node) = self.nodes.get(id) {
+                if let Some(role) = self.find_contained_role_recursive(node, name) {
+                    updates.push((id.clone(), role));
+                }
+            }
+        }
+
+        // Apply updates
+        for (id, role) in updates {
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.contains_role = Some(role);
+            }
         }
     }
 
     /// Get the root node
     pub fn root(&self) -> Option<&AXNode> {
-        self.root_id.and_then(|id| self.nodes.get(&id))
+        self.root_id.as_ref().and_then(|id| self.nodes.get(id))
     }
 
     /// Get a node by ID
-    pub fn get(&self, id: i32) -> Option<&AXNode> {
-        self.nodes.get(&id)
+    pub fn get(&self, id: &str) -> Option<&AXNode> {
+        self.nodes.get(id)
     }
 
     /// Get the focused node
     pub fn focused(&self) -> Option<&AXNode> {
-        self.focus_id.and_then(|id| self.nodes.get(&id))
+        self.focus_id.as_ref().and_then(|id| self.nodes.get(id))
     }
 
     /// Set focus to a node
-    pub fn set_focus(&mut self, id: i32) {
+    pub fn set_focus(&mut self, id: impl Into<String>) {
+        let id = id.into();
         if self.nodes.contains_key(&id) {
             self.focus_id = Some(id);
         }
     }
 
     /// Get children of a node
-    pub fn children(&self, id: i32) -> Vec<&AXNode> {
+    pub fn children(&self, id: &str) -> Vec<&AXNode> {
         self.nodes
-            .get(&id)
+            .get(id)
             .map(|node| {
                 node.child_ids
                     .iter()
@@ -70,36 +102,93 @@ impl AXTree {
     }
 
     /// Get parent of a node
-    pub fn parent(&self, id: i32) -> Option<&AXNode> {
+    pub fn parent(&self, id: &str) -> Option<&AXNode> {
         self.nodes
-            .get(&id)
-            .and_then(|node| node.parent_id)
-            .and_then(|parent_id| self.nodes.get(&parent_id))
+            .get(id)
+            .and_then(|node| node.parent_id.as_ref())
+            .and_then(|parent_id| self.nodes.get(parent_id))
+    }
+
+    /// Get the number of nodes in the tree
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Check if the tree is empty
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
     }
 
     /// Linearize the tree for output (depth-first traversal)
     pub fn linearize(&self) -> Vec<&AXNode> {
         let mut result = Vec::new();
 
-        if let Some(root_id) = self.root_id {
-            self.linearize_node(root_id, &mut result);
+        if let Some(root_id) = &self.root_id {
+            self.linearize_node(root_id, &mut result, None);
         }
 
         result
     }
 
-    fn linearize_node<'a>(&'a self, id: i32, result: &mut Vec<&'a AXNode>) {
-        if let Some(node) = self.nodes.get(&id) {
-            // Only include interesting nodes
-            if node.is_interesting() {
+    fn linearize_node<'a>(&'a self, id: &str, result: &mut Vec<&'a AXNode>, parent_name: Option<&str>) {
+        if let Some(node) = self.nodes.get(id) {
+            let dominated_by_parent = if let Some(pname) = parent_name {
+                let pname = pname.trim();
+                let nname = node.name.trim();
+
+                if nname.is_empty() {
+                    false
+                } else {
+                    // Check if names overlap significantly (one contains the other)
+                    pname.contains(nname) || nname.contains(pname)
+                }
+            } else {
+                false
+            };
+
+            // Only include interesting nodes that aren't dominated by parent
+            if node.is_interesting() && !dominated_by_parent {
                 result.push(node);
             }
 
+            // Pass current node's name to children if it's interesting and has a name
+            let child_parent_name = if node.is_interesting() && !node.name.is_empty() {
+                Some(node.name.as_str())
+            } else {
+                parent_name
+            };
+
             // Process children
             for child_id in &node.child_ids {
-                self.linearize_node(*child_id, result);
+                self.linearize_node(child_id, result, child_parent_name);
             }
         }
+    }
+
+    /// Check if a node contains an interactive child with similar name
+    /// Returns the role of the contained interactive element if found
+    pub fn find_contained_interactive_role(&self, node: &AXNode) -> Option<Role> {
+        self.find_contained_role_recursive(node, &node.name)
+    }
+
+    fn find_contained_role_recursive(&self, node: &AXNode, parent_name: &str) -> Option<Role> {
+        for child_id in &node.child_ids {
+            if let Some(child) = self.nodes.get(child_id) {
+                // Check if this child is interactive with similar name
+                if child.is_interactive() {
+                    let pname = parent_name.trim();
+                    let cname = child.name.trim();
+                    if !cname.is_empty() && (pname.contains(cname) || cname.contains(pname)) {
+                        return Some(child.role.clone());
+                    }
+                }
+                // Recurse into children
+                if let Some(role) = self.find_contained_role_recursive(child, parent_name) {
+                    return Some(role);
+                }
+            }
+        }
+        None
     }
 
     /// Get all interactive elements for Tab navigation
@@ -111,7 +200,7 @@ impl AXTree {
     }
 
     /// Find next/previous interactive element
-    pub fn find_next_interactive(&self, current_id: Option<i32>, forward: bool) -> Option<&AXNode> {
+    pub fn find_next_interactive(&self, current_id: Option<&str>, forward: bool) -> Option<&AXNode> {
         let elements = self.interactive_elements();
 
         if elements.is_empty() {

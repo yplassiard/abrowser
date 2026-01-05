@@ -5,15 +5,14 @@ mod input;
 mod media;
 mod render;
 mod state;
+mod tasks;
 
 pub use config::{Config, ViewportMode};
 pub use media::{MediaController, MediaStatus};
 pub use state::{BrowserState, FocusMode, Tab};
-
 use config::ViewportMode as VP;
 
-use crate::browser::BrowserLauncher;
-use crate::cdp::{AccessibilityDomain, CdpClient};
+use crate::backend::{create_launcher, BrowserLauncher, Key, NodeHandle};
 use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
@@ -22,36 +21,56 @@ use crossterm::{
 };
 use std::io;
 
+/// Guard that ensures terminal state is cleaned up on drop (including panics)
+struct TerminalGuard;
+
+impl TerminalGuard {
+    fn new() -> io::Result<Self> {
+        terminal::enable_raw_mode()?;
+        execute!(io::stdout(), terminal::EnterAlternateScreen)?;
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = execute!(io::stdout(), terminal::LeaveAlternateScreen, cursor::Show);
+        let _ = terminal::disable_raw_mode();
+    }
+}
+
 /// Main interactive browser shell
 pub struct Shell {
     state: BrowserState,
-    launcher: BrowserLauncher,
-    browser_client: Option<CdpClient>,
+    launcher: Box<dyn BrowserLauncher>,
     config: Config,
+    /// Pending background tree refresh
+    pending_refresh: tasks::PendingRefresh,
 }
 
 impl Shell {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let viewport_mode = config.viewport_mode;
         let (width, height) = viewport_mode.dimensions();
-        Self {
+        let backend = config.backend;
+
+        let launcher = create_launcher(backend, Some((width, height)))?;
+
+        Ok(Self {
             state: BrowserState::new().with_viewport(viewport_mode),
-            launcher: BrowserLauncher::new().with_viewport(width, height),
-            browser_client: None,
+            launcher,
             config,
-        }
+            pending_refresh: tasks::PendingRefresh::new(),
+        })
     }
 
     /// Run the interactive shell
     pub async fn run(&mut self, initial_url: Option<&str>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Launch browser
-        let browser_ws_url = self.launcher.launch()?;
-        self.browser_client = Some(CdpClient::connect(&browser_ws_url).await?);
+        self.launcher.launch().await?;
 
-        // Enter raw mode
-        terminal::enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        execute!(stdout, terminal::EnterAlternateScreen)?;
+        // Enter raw mode with cleanup guard (ensures cleanup on panic/exit)
+        let _terminal_guard = TerminalGuard::new()?;
 
         // Load initial URL or a blank page
         let url = initial_url.unwrap_or("about:blank");
@@ -62,9 +81,8 @@ impl Shell {
         // Main event loop
         let result = self.event_loop().await;
 
-        // Cleanup
-        execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show)?;
-        terminal::disable_raw_mode()?;
+        // Shutdown browser (terminal cleanup happens automatically via guard drop)
+        let _ = self.launcher.shutdown().await;
 
         result
     }
@@ -74,6 +92,26 @@ impl Shell {
         let mut refresh_counter = 0u8;
 
         loop {
+            // Poll for completed background refresh (non-blocking)
+            if let Some(result) = self.pending_refresh.poll() {
+                let tab = self.state.current_tab_mut();
+                let had_content = tab.node_count() > 0;
+                tab.set_tree(result.tree);
+                tab.needs_tree_refresh = false;
+                tab.last_dom_change = None;
+                // Update title if we got one
+                if let Some(title) = result.title {
+                    tab.title = title;
+                }
+                // If we now have content, clear loading state
+                if tab.node_count() > 0 {
+                    tab.finish_loading();
+                    if !had_content {
+                        self.state.set_status("Ready");
+                    }
+                }
+            }
+
             // Update media status less frequently (every ~500ms instead of 100ms)
             media_update_counter = media_update_counter.wrapping_add(1);
             if media_update_counter % 10 == 0 {
@@ -112,14 +150,12 @@ impl Shell {
                 || (dom_debounce_ready && self.state.current_tab().needs_tree_refresh)
                 || (refresh_counter % 20 == 0 && self.state.current_tab().needs_tree_refresh);
 
-            if should_refresh {
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_millis(200),
-                    self.force_refresh_tree()
-                ).await;
+            // Start background refresh if needed and not already running
+            if should_refresh && !self.pending_refresh.is_pending() {
+                self.start_background_refresh();
             }
 
-            // Render current state
+            // Always render current state (line-by-line update prevents blinking)
             self.render()?;
 
             // Wait for input (shorter interval for responsiveness)
@@ -134,15 +170,17 @@ impl Shell {
         Ok(())
     }
 
-    /// Process any pending CDP events (non-blocking)
+    /// Process any pending browser events (non-blocking)
     fn process_cdp_events(&mut self) -> bool {
+        use crate::backend::BrowserEvent;
+
         let mut needs_refresh = false;
 
         // Collect events first to avoid borrow issues
         let events: Vec<_> = {
-            if let Some(ref client) = self.state.current_tab().page_client {
+            if let Some(ref session) = self.state.current_tab().session {
                 let mut events = Vec::new();
-                while let Some(event) = client.try_recv_event() {
+                while let Some(event) = session.try_recv_event() {
                     events.push(event);
                 }
                 events
@@ -153,43 +191,43 @@ impl Shell {
 
         // Process collected events
         for event in events {
-            match event.method.as_str() {
+            match event {
                 // Network events for loading progress
-                "Network.requestWillBeSent" => {
+                BrowserEvent::NetworkRequestStarted { .. } => {
                     let tab = self.state.current_tab_mut();
                     tab.pending_requests += 1;
                     tab.total_requests += 1;
                     tab.update_loading_progress();
                 }
-                "Network.loadingFinished" | "Network.loadingFailed" => {
+                BrowserEvent::NetworkRequestCompleted { .. } | BrowserEvent::NetworkRequestFailed { .. } => {
                     let tab = self.state.current_tab_mut();
                     tab.pending_requests = tab.pending_requests.saturating_sub(1);
                     tab.update_loading_progress();
                 }
                 // DOM/Accessibility changes - trigger refresh
-                "DOM.documentUpdated" => {
-                    // Full document change - refresh immediately
-                    self.state.current_tab_mut().needs_tree_refresh = true;
-                    needs_refresh = true;
-                }
-                "DOM.childNodeCountUpdated" | "DOM.childNodeInserted" | "DOM.childNodeRemoved" => {
-                    // Incremental DOM changes - mark for debounced refresh
+                BrowserEvent::DomChanged => {
                     let tab = self.state.current_tab_mut();
                     tab.needs_tree_refresh = true;
                     tab.last_dom_change = Some(std::time::Instant::now());
                 }
-                "Accessibility.loadComplete" | "Accessibility.nodesUpdated" => {
+                BrowserEvent::AccessibilityChanged => {
                     self.state.current_tab_mut().needs_tree_refresh = true;
                     needs_refresh = true;
                 }
                 // Page load complete
-                "Page.loadEventFired" => {
+                BrowserEvent::LoadComplete => {
                     self.state.current_tab_mut().finish_loading();
                     self.state.current_tab_mut().needs_tree_refresh = true;
                     needs_refresh = true;
                 }
-                "Page.domContentEventFired" => {
+                BrowserEvent::DomContentLoaded => {
                     self.state.current_tab_mut().needs_tree_refresh = true;
+                }
+                BrowserEvent::LoadStarted => {
+                    self.state.current_tab_mut().start_loading();
+                }
+                BrowserEvent::TitleChanged { title } => {
+                    self.state.current_tab_mut().title = title;
                 }
                 _ => {}
             }
@@ -204,110 +242,74 @@ impl Shell {
         needs_refresh
     }
 
-    /// Refresh the accessibility tree if needed
-    async fn maybe_refresh_tree(&mut self) {
-        if !self.state.current_tab().needs_tree_refresh {
-            return;
-        }
-        self.force_refresh_tree().await;
-    }
-
-    /// Force refresh the accessibility tree (also clears loading state if successful)
-    async fn force_refresh_tree(&mut self) {
-        // Save current element for focus restoration
-        let saved_element = {
+    async fn update_media_status(&mut self) {
+        let status_result = {
             let tab = self.state.current_tab();
-            tab.current_node().map(|node| {
-                (node.role_str().to_string(), node.name_str().to_string())
-            })
+            if let Some(ref session) = tab.session {
+                session.get_media_status().await.ok()
+            } else {
+                None
+            }
         };
 
-        if let Some(ref client) = self.state.current_tab().page_client {
-            let ax = AccessibilityDomain::new(client);
-            if let Ok(tree) = ax.get_full_tree().await {
-                let tab = self.state.current_tab_mut();
-                let had_content = tab.node_count() > 0;
-                tab.set_tree(tree);
-                tab.needs_tree_refresh = false;
-                tab.last_dom_change = None;
-
-                // If we now have content, clear loading state
-                if tab.node_count() > 0 {
-                    tab.finish_loading();
-                    if !had_content {
-                        self.state.set_status("Ready");
-                    }
-                }
-
-                // Restore focus if possible
-                if let Some((role, name)) = saved_element {
-                    if let Some(idx) = self.state.current_tab().find_by_role_and_name(&role, &name) {
-                        self.state.current_tab_mut().cursor_index = idx;
-                    }
-                }
-            }
-        }
-    }
-
-    async fn update_media_status(&mut self) {
-        if let Some(ref client) = self.state.current_tab().page_client {
-            if let Ok(status) = MediaController::get_status(client).await {
-                self.state.media_status = if status.has_video {
-                    Some(status)
-                } else {
-                    None
-                };
-            }
+        if let Some(status) = status_result {
+            self.state.media_status = if status.has_video {
+                Some(MediaStatus::from_backend(status))
+            } else {
+                None
+            };
         }
     }
 
     /// Focus the current element in the browser (triggers onFocus/onBlur events)
     async fn focus_current_in_browser(&mut self) {
-        // Get the backend DOM node ID of the current element
-        let backend_id = {
+        // Get the handle of the current element
+        let handle = {
             let tab = self.state.current_tab();
-            tab.current_node().and_then(|node| node.backend_dom_node_id)
+            tab.current_node().and_then(|node| node.handle.clone())
         };
 
-        if let Some(backend_id) = backend_id {
-            if let Some(ref client) = self.state.current_tab().page_client {
+        if let Some(handle) = handle {
+            let tab = self.state.current_tab();
+            if let Some(ref session) = tab.session {
                 // Focus the element - this triggers onFocus/onBlur events in JS
-                let _ = client.call("DOM.focus", serde_json::json!({
-                    "backendNodeId": backend_id
-                })).await;
+                let _ = session.focus_node(&handle).await;
             }
         }
     }
 
     /// Scroll the browser viewport by a given amount (positive = down, negative = up)
     async fn scroll_browser_viewport(&mut self, delta: i32) {
-        if let Some(ref client) = self.state.current_tab().page_client {
-            let _ = client.call("Runtime.evaluate", serde_json::json!({
-                "expression": format!("window.scrollBy(0, {})", delta)
-            })).await;
-            // Mark for tree refresh to pick up newly loaded content
-            self.state.current_tab_mut().needs_tree_refresh = true;
+        {
+            let tab = self.state.current_tab();
+            if let Some(ref session) = tab.session {
+                let _ = session.scroll(0, delta).await;
+            }
         }
+        // Mark for tree refresh to pick up newly loaded content
+        self.state.current_tab_mut().needs_tree_refresh = true;
     }
 
     /// Scroll browser to top of page
     async fn scroll_browser_to_top(&mut self) {
-        if let Some(ref client) = self.state.current_tab().page_client {
-            let _ = client.call("Runtime.evaluate", serde_json::json!({
-                "expression": "window.scrollTo(0, 0)"
-            })).await;
-            self.state.current_tab_mut().needs_tree_refresh = true;
+        {
+            let tab = self.state.current_tab();
+            if let Some(ref session) = tab.session {
+                let _ = session.scroll_to_top().await;
+            }
         }
+        self.state.current_tab_mut().needs_tree_refresh = true;
     }
 
     /// Scroll browser to bottom of page (triggers lazy loading)
     async fn scroll_browser_to_bottom(&mut self) {
-        if let Some(ref client) = self.state.current_tab().page_client {
-            let _ = client.call("Runtime.evaluate", serde_json::json!({
-                "expression": "window.scrollTo(0, document.body.scrollHeight)"
-            })).await;
-            self.state.current_tab_mut().needs_tree_refresh = true;
+        {
+            let tab = self.state.current_tab();
+            if let Some(ref session) = tab.session {
+                let _ = session.scroll_to_bottom().await;
+            }
         }
+        self.state.current_tab_mut().needs_tree_refresh = true;
     }
 
     /// Handle a key event, returns true if should exit
@@ -355,9 +357,10 @@ impl Shell {
                 self.refresh_page().await?;
             }
             (KeyModifiers::NONE, KeyCode::F(4)) => {
-                // Quick tree refresh without page reload
+                // Quick tree refresh without page reload (non-blocking)
                 self.state.set_status("Refreshing tree...");
-                self.force_refresh_tree().await;
+                self.state.current_tab_mut().needs_tree_refresh = true;
+                self.start_background_refresh();
             }
             (KeyModifiers::CONTROL, KeyCode::Char('m')) => {
                 self.toggle_viewport().await?;
@@ -465,6 +468,14 @@ impl Shell {
             }
             (KeyModifiers::SHIFT, KeyCode::Char('R')) => {
                 self.state.prev_element("radiobutton");
+                self.focus_current_in_browser().await;
+            }
+            (KeyModifiers::NONE, KeyCode::Char('c')) => {
+                self.state.next_element("combobox");
+                self.focus_current_in_browser().await;
+            }
+            (KeyModifiers::SHIFT, KeyCode::Char('C')) => {
+                self.state.prev_element("combobox");
                 self.focus_current_in_browser().await;
             }
             (KeyModifiers::NONE, KeyCode::Char('l')) => {
@@ -577,10 +588,6 @@ impl Shell {
                 // Faster playback
                 self.media_adjust_speed(0.25).await?;
             }
-            (KeyModifiers::NONE, KeyCode::Char('c')) => {
-                // Toggle captions
-                self.media_toggle_captions().await?;
-            }
             (KeyModifiers::NONE, KeyCode::Char('0')) => {
                 self.media_seek_percent(0).await?;
             }
@@ -648,8 +655,6 @@ impl Shell {
 
     /// Open a URL in the current tab
     pub async fn open_url(&mut self, url: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let browser_client = self.browser_client.as_ref().ok_or("Browser not connected")?;
-
         // Normalize URL
         let url = if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("file://") {
             url.to_string()
@@ -665,28 +670,22 @@ impl Shell {
         self.state.set_status(&format!("Loading: {}", url));
         self.render()?;
 
-        // Create page target
-        let page_ws_url = self.launcher.create_page(browser_client, &url).await?;
-        let page_client = CdpClient::connect(&page_ws_url).await?;
+        // Create page session via the launcher
+        let session = self.launcher.create_page(&url).await?;
 
-        // Enable domains for event subscriptions (non-blocking)
-        let _ = page_client.call("Network.enable", serde_json::json!({})).await;
-        let _ = page_client.call("Page.enable", serde_json::json!({})).await;
-        let _ = page_client.call("DOM.enable", serde_json::json!({})).await;
-
-        // Enable accessibility
-        let accessibility = AccessibilityDomain::new(&page_client);
-        let _ = accessibility.enable().await;
-
-        // Store client immediately so user can interact
+        // Store session immediately so user can interact (wrap in Arc for background task sharing)
         let tab = self.state.current_tab_mut();
         tab.url = url;
-        tab.page_client = Some(page_client);
+        tab.session = Some(std::sync::Arc::from(session));
         tab.needs_tree_refresh = true;
         tab.push_history();
         tab.loading_started = Some(std::time::Instant::now());
 
-        // Loading continues in background - event loop will handle tree refresh
+        // Start background tree refresh (non-blocking)
+        // Wait briefly for page to start loading, then kick off background refresh
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        self.start_background_refresh();
+
         self.state.set_status("Loading...");
         Ok(())
     }
@@ -716,31 +715,21 @@ impl Shell {
 
     /// Navigate to a URL from history (without adding to history)
     async fn navigate_to_history_url(&mut self, url: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let browser_client = self.browser_client.as_ref().ok_or("Browser not connected")?;
-
         self.state.current_tab_mut().start_loading();
         self.render()?;
 
-        let page_ws_url = self.launcher.create_page(browser_client, url).await?;
-        let page_client = CdpClient::connect(&page_ws_url).await?;
-
-        let _ = page_client.call("Network.enable", serde_json::json!({})).await;
-        let _ = page_client.call("Page.enable", serde_json::json!({})).await;
-        let _ = page_client.call("DOM.enable", serde_json::json!({})).await;
-
-        let accessibility = AccessibilityDomain::new(&page_client);
-        let _ = accessibility.enable().await;
+        // Create page session via the launcher
+        let session = self.launcher.create_page(url).await?;
 
         let tab = self.state.current_tab_mut();
         tab.url = url.to_string();
-        tab.page_client = Some(page_client);
+        tab.session = Some(std::sync::Arc::from(session));
         tab.needs_tree_refresh = true;
+        tab.loading_started = Some(std::time::Instant::now());
         // Don't push to history - we're navigating within history
 
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            self.maybe_refresh_tree()
-        ).await;
+        // Start background tree refresh (non-blocking)
+        self.start_background_refresh();
 
         self.state.set_status("Loading...");
         Ok(())
@@ -943,59 +932,46 @@ impl Shell {
     }
 
     /// Edit a text field with a prompt showing the field's label
-    async fn edit_text_field(&mut self, label: &str, backend_id: i64, role: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn edit_text_field(&mut self, label: &str, handle: &NodeHandle, role: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let is_textarea = role == "textarea";
         let is_combobox = role == "combobox";
+        let handle = handle.clone();
 
         // Get current value and options (for combobox) from the field
-        let (current_value, options) = if let Some(ref client) = self.state.current_tab().page_client {
+        let (current_value, options) = if let Some(ref session) = self.state.current_tab().session {
             // First focus the element
-            let _ = client.call("DOM.focus", serde_json::json!({
-                "backendNodeId": backend_id
-            })).await;
+            let _ = session.focus_node(&handle).await;
 
-            // Try to get the current value via JavaScript
-            let result = client.call("Runtime.evaluate", serde_json::json!({
-                "expression": "document.activeElement?.value || ''"
-            })).await;
-
-            let value = result.ok()
-                .and_then(|r| r.get("result").cloned())
-                .and_then(|r| r.get("value").cloned())
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .unwrap_or_default();
+            // Try to get the current value via the session
+            let value = session.get_field_value(&handle).await.unwrap_or_default();
 
             // For combobox, try to get options from datalist or associated list
             let opts: Vec<String> = if is_combobox {
-                let opts_result = client.call("Runtime.evaluate", serde_json::json!({
-                    "expression": r#"
-                        (function() {
-                            const el = document.activeElement;
-                            if (!el) return [];
-                            // Check for datalist
-                            const listId = el.getAttribute('list');
-                            if (listId) {
-                                const datalist = document.getElementById(listId);
-                                if (datalist) {
-                                    return Array.from(datalist.options).map(o => o.value || o.textContent);
-                                }
+                let opts_result = session.evaluate_js(r#"
+                    (function() {
+                        const el = document.activeElement;
+                        if (!el) return [];
+                        // Check for datalist
+                        const listId = el.getAttribute('list');
+                        if (listId) {
+                            const datalist = document.getElementById(listId);
+                            if (datalist) {
+                                return Array.from(datalist.options).map(o => o.value || o.textContent);
                             }
-                            // Check for aria-owns or aria-controls
-                            const listboxId = el.getAttribute('aria-owns') || el.getAttribute('aria-controls');
-                            if (listboxId) {
-                                const listbox = document.getElementById(listboxId);
-                                if (listbox) {
-                                    return Array.from(listbox.querySelectorAll('[role="option"]')).map(o => o.textContent.trim());
-                                }
+                        }
+                        // Check for aria-owns or aria-controls
+                        const listboxId = el.getAttribute('aria-owns') || el.getAttribute('aria-controls');
+                        if (listboxId) {
+                            const listbox = document.getElementById(listboxId);
+                            if (listbox) {
+                                return Array.from(listbox.querySelectorAll('[role="option"]')).map(o => o.textContent.trim());
                             }
-                            return [];
-                        })()
-                    "#
-                })).await;
+                        }
+                        return [];
+                    })()
+                "#).await;
 
                 opts_result.ok()
-                    .and_then(|r| r.get("result").cloned())
-                    .and_then(|r| r.get("value").cloned())
                     .and_then(|v| v.as_array().cloned())
                     .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
                     .unwrap_or_default()
@@ -1032,7 +1008,7 @@ impl Shell {
                     KeyCode::Enter if !is_textarea => {
                         // Submit for non-textarea fields
                         self.state.hide_input_prompt();
-                        self.submit_text_field(&input, backend_id, true).await?;
+                        self.submit_text_field(&input, &handle, true).await?;
                         self.state.set_status(&format!("Set {}: {}", prompt_label, input));
                         self.state.current_tab_mut().needs_tree_refresh = true;
                         break;
@@ -1047,7 +1023,7 @@ impl Shell {
                     KeyCode::Tab => {
                         // Submit and move to next element
                         self.state.hide_input_prompt();
-                        self.submit_text_field(&input, backend_id, false).await?;
+                        self.submit_text_field(&input, &handle, false).await?;
                         self.state.set_status(&format!("Set {}: {}", prompt_label, input));
                         self.state.current_tab_mut().needs_tree_refresh = true;
                         // Move to next element
@@ -1209,35 +1185,32 @@ impl Shell {
     }
 
     /// Submit text to a field
-    async fn submit_text_field(&mut self, input: &str, backend_id: i64, send_enter: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(ref client) = self.state.current_tab().page_client {
-            // Focus the element
-            let _ = client.call("DOM.focus", serde_json::json!({
-                "backendNodeId": backend_id
-            })).await;
-
-            // Clear the field and set new value
-            let _ = client.call("Runtime.evaluate", serde_json::json!({
-                "expression": format!(
-                    "if (document.activeElement) {{ document.activeElement.value = {}; document.activeElement.dispatchEvent(new Event('input', {{ bubbles: true }})); }}",
-                    serde_json::to_string(input).unwrap_or_default()
-                )
-            })).await;
+    async fn submit_text_field(&mut self, input: &str, handle: &NodeHandle, send_enter: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(ref session) = self.state.current_tab().session {
+            // Set the field value directly using the session trait
+            let _ = session.set_field_value(handle, input).await;
 
             // Send Enter key if requested (for search boxes etc)
             if send_enter {
-                let _ = client.call("Input.dispatchKeyEvent", serde_json::json!({
-                    "type": "keyDown",
-                    "key": "Enter",
-                    "code": "Enter",
-                    "windowsVirtualKeyCode": 13,
-                    "nativeVirtualKeyCode": 13
-                })).await;
-                let _ = client.call("Input.dispatchKeyEvent", serde_json::json!({
-                    "type": "keyUp",
-                    "key": "Enter",
-                    "code": "Enter"
-                })).await;
+                let _ = session.send_key(Key::Enter, crate::backend::KeyModifiers::none()).await;
+
+                // Poll for navigation event (LoadStarted or UrlChanged) with timeout
+                let start = std::time::Instant::now();
+                let timeout = std::time::Duration::from_millis(500);
+
+                while start.elapsed() < timeout {
+                    if let Some(event) = session.try_recv_event() {
+                        use crate::backend::BrowserEvent;
+                        match event {
+                            BrowserEvent::LoadStarted | BrowserEvent::UrlChanged { .. } => {
+                                self.state.current_tab_mut().start_loading();
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
             }
         }
         Ok(())
@@ -1325,13 +1298,11 @@ impl Shell {
     }
 
     async fn save_page(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Get page HTML via CDP
-        if let Some(ref client) = self.state.current_tab().page_client {
-            let result = client.call("Runtime.evaluate", serde_json::json!({
-                "expression": "document.documentElement.outerHTML"
-            })).await?;
+        // Get page HTML via session
+        if let Some(ref session) = self.state.current_tab().session {
+            let result = session.evaluate_js("document.documentElement.outerHTML").await?;
 
-            if let Some(html) = result.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_str()) {
+            if let Some(html) = result.as_str() {
                 self.state.show_input_prompt("Save to: ");
                 self.render()?;
 
@@ -1376,68 +1347,54 @@ impl Shell {
     }
 
     async fn print_page(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(ref client) = self.state.current_tab().page_client {
-            // Use CDP to trigger print
-            client.call("Page.printToPDF", serde_json::json!({
-                "displayHeaderFooter": true,
-                "printBackground": true
-            })).await?;
-            self.state.set_status("Print dialog opened (check browser)");
+        if let Some(ref session) = self.state.current_tab().session {
+            // Use JavaScript to trigger print
+            let _ = session.evaluate_js("window.print()").await;
+            self.state.set_status("Print dialog opened");
         }
         Ok(())
     }
 
     async fn refresh_page(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Save current element info to restore focus after refresh
-        let saved_element = {
-            let tab = self.state.current_tab();
-            tab.current_node().map(|node| {
-                (node.role_str().to_string(), node.name_str().to_string())
-            })
-        };
-
         self.state.set_status("Refreshing page...");
         self.render()?;
 
-        if let Some(ref client) = self.state.current_tab().page_client {
-            // Reload the page
-            client.call("Page.reload", serde_json::json!({
-                "ignoreCache": false
-            })).await?;
+        if let Some(ref session) = self.state.current_tab().session {
+            // Reload the page using the session trait (with timeout)
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                session.reload()
+            ).await;
 
-            // Wait for page to load
-            tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
-
-            // Refresh accessibility tree
-            self.refresh_current_tab().await?;
-
-            // Try to restore focus to the same element
-            if let Some((role, name)) = saved_element {
-                if let Some(idx) = self.state.current_tab().find_by_role_and_name(&role, &name) {
-                    self.state.current_tab_mut().cursor_index = idx;
-                    self.state.set_status(&format!("Page refreshed (restored: {})", name));
-                } else {
-                    self.state.set_status("Page refreshed");
-                }
-            } else {
-                self.state.set_status("Page refreshed");
-            }
+            // Mark as needing refresh and start background tree fetch
+            let tab = self.state.current_tab_mut();
+            tab.needs_tree_refresh = true;
+            tab.loading_started = Some(std::time::Instant::now());
         }
+
+        // Wait briefly for page to start reloading, then start background refresh
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        self.start_background_refresh();
+
+        self.state.set_status("Loading...");
         Ok(())
     }
 
     async fn toggle_viewport(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.state.toggle_viewport();
         let (width, height) = self.state.viewport_mode.dimensions();
+        let is_mobile = self.state.viewport_mode == VP::Mobile;
 
-        // Apply viewport to current page via CDP
-        if let Some(ref client) = self.state.current_tab().page_client {
-            client.call("Emulation.setDeviceMetricsOverride", serde_json::json!({
-                "width": width,
-                "height": height,
-                "deviceScaleFactor": 1,
-                "mobile": self.state.viewport_mode == VP::Mobile
-            })).await?;
+        // Update launcher for future pages
+        self.launcher.set_viewport(width, height);
+
+        // Apply viewport to current page via session
+        if let Some(ref session) = self.state.current_tab().session {
+            // Set viewport with timeout
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                session.set_viewport(width, height, is_mobile)
+            ).await;
 
             // Refresh the page to apply layout changes
             self.refresh_page().await?;
@@ -1452,13 +1409,13 @@ impl Shell {
 
     async fn activate_current_element(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Get node info while we have immutable borrow
-        let (role, name, backend_id) = {
+        let (role, name, handle): (String, String, Option<NodeHandle>) = {
             let tab = self.state.current_tab();
             if let Some(node) = tab.current_node() {
                 (
                     node.role_str().to_lowercase(),
                     node.name_str().to_string(),
-                    node.backend_dom_node_id,
+                    node.handle.clone(),
                 )
             } else {
                 self.state.set_status("No element selected");
@@ -1466,42 +1423,42 @@ impl Shell {
             }
         };
 
-        self.state.set_status(&format!("Activating: {}", name));
+        self.state.set_status(&format!("Activating: {}", &name));
         self.render()?;
 
         // Handle based on role
         match role.as_str() {
             "link" => {
-                if let Some(backend_id) = backend_id {
-                    self.click_element(backend_id).await?;
+                if let Some(handle) = handle {
+                    self.click_element(&handle).await?;
                 } else {
                     self.state.set_status("Cannot activate: no DOM node");
                 }
             }
             "button" => {
-                if let Some(backend_id) = backend_id {
-                    self.click_element(backend_id).await?;
+                if let Some(handle) = handle {
+                    self.click_element(&handle).await?;
                 } else {
                     self.state.set_status("Cannot activate: no DOM node");
                 }
             }
             "checkbox" | "radiobutton" => {
-                if let Some(backend_id) = backend_id {
-                    self.click_element(backend_id).await?;
+                if let Some(handle) = handle {
+                    self.click_element(&handle).await?;
                 }
             }
             "textbox" | "textarea" | "textfield" | "searchbox" | "combobox" => {
                 // Open text input prompt for the field
-                if let Some(backend_id) = backend_id {
-                    self.edit_text_field(&name, backend_id, &role).await?;
+                if let Some(handle) = handle {
+                    self.edit_text_field(&name, &handle, &role).await?;
                 } else {
                     self.state.set_status("Cannot edit: no DOM node");
                 }
             }
             _ => {
                 // Try to click any element
-                if let Some(backend_id) = backend_id {
-                    self.click_element(backend_id).await?;
+                if let Some(handle) = handle {
+                    self.click_element(&handle).await?;
                 } else {
                     self.state.set_status(&format!("Cannot activate {} element", role));
                 }
@@ -1511,89 +1468,37 @@ impl Shell {
         Ok(())
     }
 
-    async fn click_element(&mut self, backend_node_id: i64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Save current element and URL for potential focus restoration
-        let (saved_element, saved_url) = {
-            let tab = self.state.current_tab();
-            let element = tab.current_node().map(|node| {
-                (node.role_str().to_string(), node.name_str().to_string())
-            });
-            (element, tab.url.clone())
-        };
-
-        let client = match &self.state.current_tab().page_client {
-            Some(c) => c,
+    async fn click_element(&mut self, handle: &NodeHandle) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Clone session to avoid borrow issues
+        let session = match self.state.current_tab().session.clone() {
+            Some(s) => s,
             None => {
                 self.state.set_status("No page loaded");
                 return Ok(());
             }
         };
 
-        // First, get the node's remote object
-        let resolve_result = client.call("DOM.resolveNode", serde_json::json!({
-            "backendNodeId": backend_node_id
-        })).await?;
+        // Click the element using the session trait
+        session.click_node(handle).await?;
 
-        if let Some(object_id) = resolve_result.get("object").and_then(|o| o.get("objectId")).and_then(|v| v.as_str()) {
-            // Call click() on the element
-            client.call("Runtime.callFunctionOn", serde_json::json!({
-                "objectId": object_id,
-                "functionDeclaration": "function() { this.click(); }",
-                "returnByValue": true
-            })).await?;
+        self.state.set_status("Clicked...");
+        self.render()?;
 
-            // Short wait for any immediate DOM changes, then refresh
-            self.state.set_status("Clicked...");
-            self.render()?;
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        // Wait for CSS transitions/animations (with timeout to prevent freeze)
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
 
-            // Refresh the accessibility tree
-            self.refresh_current_tab().await?;
-
-            // Check if URL changed (navigation vs AJAX update)
-            let current_url = self.state.current_tab().url.clone();
-            if current_url == saved_url {
-                // Same page (AJAX update) - try to restore focus
-                if let Some((role, name)) = saved_element {
-                    if let Some(idx) = self.state.current_tab().find_by_role_and_name(&role, &name) {
-                        self.state.current_tab_mut().cursor_index = idx;
-                    }
-                }
-            }
-            self.state.set_status("Ready");
-        } else {
-            // Fallback: try focus + evaluate click
-            client.call("DOM.focus", serde_json::json!({
-                "backendNodeId": backend_node_id
-            })).await?;
-
-            client.call("Runtime.evaluate", serde_json::json!({
-                "expression": "document.activeElement.click()"
-            })).await?;
-
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            self.refresh_current_tab().await?;
-
-            // Check if URL changed
-            let current_url = self.state.current_tab().url.clone();
-            if current_url == saved_url {
-                if let Some((role, name)) = saved_element {
-                    if let Some(idx) = self.state.current_tab().find_by_role_and_name(&role, &name) {
-                        self.state.current_tab_mut().cursor_index = idx;
-                    }
-                }
-            }
-            self.state.set_status("Ready");
-        }
+        // Request non-blocking tree refresh (event loop will poll for completion)
+        // Note: reflow is now forced in get_accessibility_tree itself
+        self.request_tree_refresh();
 
         Ok(())
     }
 
     async fn toggle_current_element(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let (role, backend_id) = {
+        let (role, handle): (String, Option<NodeHandle>) = {
             let tab = self.state.current_tab();
             if let Some(node) = tab.current_node() {
-                (node.role_str().to_lowercase(), node.backend_dom_node_id)
+                (node.role_str().to_lowercase(), node.handle.clone())
             } else {
                 return Ok(());
             }
@@ -1601,14 +1506,14 @@ impl Shell {
 
         match role.as_str() {
             "checkbox" | "radiobutton" => {
-                if let Some(backend_id) = backend_id {
-                    self.click_element(backend_id).await?;
+                if let Some(handle) = handle {
+                    self.click_element(&handle).await?;
                 }
             }
             _ => {
                 // Space on other elements also activates them
-                if let Some(backend_id) = backend_id {
-                    self.click_element(backend_id).await?;
+                if let Some(handle) = handle {
+                    self.click_element(&handle).await?;
                 }
             }
         }
@@ -1617,8 +1522,8 @@ impl Shell {
 
     /// Navigate using page's native tab order
     async fn tab_to_next_element(&mut self, shift: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let client = match &self.state.current_tab().page_client {
-            Some(c) => c,
+        let session = match &self.state.current_tab().session {
+            Some(s) => s,
             None => {
                 // Fallback to our own logic if no page loaded
                 if shift {
@@ -1631,64 +1536,46 @@ impl Shell {
         };
 
         // Dispatch Tab or Shift+Tab key to the page
-        let modifiers = if shift { 8 } else { 0 }; // 8 = Shift modifier
-
-        client.call("Input.dispatchKeyEvent", serde_json::json!({
-            "type": "keyDown",
-            "key": "Tab",
-            "code": "Tab",
-            "windowsVirtualKeyCode": 9,
-            "nativeVirtualKeyCode": 9,
-            "modifiers": modifiers
-        })).await?;
-
-        client.call("Input.dispatchKeyEvent", serde_json::json!({
-            "type": "keyUp",
-            "key": "Tab",
-            "code": "Tab",
-            "windowsVirtualKeyCode": 9,
-            "nativeVirtualKeyCode": 9,
-            "modifiers": modifiers
-        })).await?;
+        let modifiers = if shift {
+            crate::backend::KeyModifiers::shift()
+        } else {
+            crate::backend::KeyModifiers::none()
+        };
+        session.send_key(Key::Tab, modifiers).await?;
 
         // Give the page a moment to update focus
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Query which element is now focused
-        let result = client.call("Runtime.evaluate", serde_json::json!({
-            "expression": r#"
-                (function() {
-                    const el = document.activeElement;
-                    if (!el || el === document.body) return null;
-                    return {
-                        tagName: el.tagName,
-                        id: el.id,
-                        className: el.className,
-                        textContent: (el.textContent || '').substring(0, 100).trim(),
-                        ariaLabel: el.getAttribute('aria-label') || '',
-                        name: el.getAttribute('name') || ''
-                    };
-                })()
-            "#,
-            "returnByValue": true
-        })).await?;
+        let result = session.evaluate_js(r#"
+            (function() {
+                const el = document.activeElement;
+                if (!el || el === document.body) return null;
+                return {
+                    tagName: el.tagName,
+                    id: el.id,
+                    className: el.className,
+                    textContent: (el.textContent || '').substring(0, 100).trim(),
+                    ariaLabel: el.getAttribute('aria-label') || '',
+                    name: el.getAttribute('name') || ''
+                };
+            })()
+        "#).await?;
 
         // Try to find this element in our accessibility tree
-        if let Some(value) = result.get("result").and_then(|r| r.get("value")) {
-            if !value.is_null() {
-                let text = value.get("textContent").and_then(|v| v.as_str()).unwrap_or("");
-                let aria_label = value.get("ariaLabel").and_then(|v| v.as_str()).unwrap_or("");
-                let name = value.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        if !result.is_null() {
+            let text = result.get("textContent").and_then(|v| v.as_str()).unwrap_or("");
+            let aria_label = result.get("ariaLabel").and_then(|v| v.as_str()).unwrap_or("");
+            let name = result.get("name").and_then(|v| v.as_str()).unwrap_or("");
 
-                // Try to find by aria-label first, then by text content, then by name
-                let search_terms = [aria_label, text, name];
-                for term in search_terms {
-                    if !term.is_empty() {
-                        if let Some(idx) = self.state.current_tab().find_by_name(term) {
-                            self.state.current_tab_mut().cursor_index = idx;
-                            self.state.set_status(&format!("Focused: {}", term));
-                            return Ok(());
-                        }
+            // Try to find by aria-label first, then by text content, then by name
+            let search_terms = [aria_label, text, name];
+            for term in search_terms {
+                if !term.is_empty() {
+                    if let Some(idx) = self.state.current_tab().find_by_name(term) {
+                        self.state.current_tab_mut().cursor_index = idx;
+                        self.state.set_status(&format!("Focused: {}", term));
+                        return Ok(());
                     }
                 }
             }
@@ -1704,7 +1591,8 @@ impl Shell {
     }
 
     async fn send_key_to_element(&mut self, key: KeyEvent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(ref client) = self.state.current_tab().page_client {
+        if let Some(ref session) = self.state.current_tab().session {
+            let modifiers = crate::backend::KeyModifiers::none();
             match key.code {
                 KeyCode::Char(c) => {
                     // Handle character input - account for shift
@@ -1713,110 +1601,67 @@ impl Shell {
                     } else {
                         c.to_string()
                     };
-                    client.call("Input.insertText", serde_json::json!({
-                        "text": text
-                    })).await?;
+                    session.send_text(&text).await?;
                 }
-                KeyCode::Enter => {
-                    // Dispatch Enter key event
-                    client.call("Input.dispatchKeyEvent", serde_json::json!({
-                        "type": "keyDown",
-                        "key": "Enter",
-                        "code": "Enter",
-                        "windowsVirtualKeyCode": 13,
-                        "nativeVirtualKeyCode": 13
-                    })).await?;
-                    client.call("Input.dispatchKeyEvent", serde_json::json!({
-                        "type": "keyUp",
-                        "key": "Enter",
-                        "code": "Enter",
-                        "windowsVirtualKeyCode": 13,
-                        "nativeVirtualKeyCode": 13
-                    })).await?;
-                }
-                KeyCode::Backspace => {
-                    // Dispatch Backspace key event
-                    client.call("Input.dispatchKeyEvent", serde_json::json!({
-                        "type": "keyDown",
-                        "key": "Backspace",
-                        "code": "Backspace",
-                        "windowsVirtualKeyCode": 8,
-                        "nativeVirtualKeyCode": 8
-                    })).await?;
-                    client.call("Input.dispatchKeyEvent", serde_json::json!({
-                        "type": "keyUp",
-                        "key": "Backspace",
-                        "code": "Backspace",
-                        "windowsVirtualKeyCode": 8,
-                        "nativeVirtualKeyCode": 8
-                    })).await?;
-                }
-                KeyCode::Tab => {
-                    client.call("Input.dispatchKeyEvent", serde_json::json!({
-                        "type": "keyDown",
-                        "key": "Tab",
-                        "code": "Tab",
-                        "windowsVirtualKeyCode": 9,
-                        "nativeVirtualKeyCode": 9
-                    })).await?;
-                    client.call("Input.dispatchKeyEvent", serde_json::json!({
-                        "type": "keyUp",
-                        "key": "Tab",
-                        "code": "Tab",
-                        "windowsVirtualKeyCode": 9,
-                        "nativeVirtualKeyCode": 9
-                    })).await?;
-                }
-                KeyCode::Left => {
-                    client.call("Input.dispatchKeyEvent", serde_json::json!({
-                        "type": "keyDown",
-                        "key": "ArrowLeft",
-                        "code": "ArrowLeft",
-                        "windowsVirtualKeyCode": 37,
-                        "nativeVirtualKeyCode": 37
-                    })).await?;
-                    client.call("Input.dispatchKeyEvent", serde_json::json!({
-                        "type": "keyUp",
-                        "key": "ArrowLeft",
-                        "code": "ArrowLeft"
-                    })).await?;
-                }
-                KeyCode::Right => {
-                    client.call("Input.dispatchKeyEvent", serde_json::json!({
-                        "type": "keyDown",
-                        "key": "ArrowRight",
-                        "code": "ArrowRight",
-                        "windowsVirtualKeyCode": 39,
-                        "nativeVirtualKeyCode": 39
-                    })).await?;
-                    client.call("Input.dispatchKeyEvent", serde_json::json!({
-                        "type": "keyUp",
-                        "key": "ArrowRight",
-                        "code": "ArrowRight"
-                    })).await?;
-                }
+                KeyCode::Enter => session.send_key(Key::Enter, modifiers).await?,
+                KeyCode::Backspace => session.send_key(Key::Backspace, modifiers).await?,
+                KeyCode::Tab => session.send_key(Key::Tab, modifiers).await?,
+                KeyCode::Left => session.send_key(Key::ArrowLeft, modifiers).await?,
+                KeyCode::Right => session.send_key(Key::ArrowRight, modifiers).await?,
                 _ => {}
             }
         }
         Ok(())
     }
 
-    async fn refresh_current_tab(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// Request a tree refresh (non-blocking)
+    fn request_tree_refresh(&mut self) {
         let tab = self.state.current_tab_mut();
-        if let Some(ref client) = tab.page_client {
-            let accessibility = AccessibilityDomain::new(client);
-            let tree = accessibility.get_full_tree().await?;
-            tab.set_tree(tree);
+        tab.needs_tree_refresh = true;
+        self.start_background_refresh();
+    }
+
+    /// Start a background tree refresh (non-blocking)
+    fn start_background_refresh(&mut self) {
+        if let Some(session) = self.state.current_tab().session.clone() {
+            let handle = tokio::spawn(async move {
+                // Fetch tree with timeout
+                let tree = match tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    session.get_accessibility_tree()
+                ).await {
+                    Ok(Ok(tree)) => tree,
+                    Ok(Err(e)) => {
+                        crate::utils::log::log(&format!("Background refresh error: {}", e));
+                        return None;
+                    }
+                    Err(_) => {
+                        crate::utils::log::log("Background refresh timeout");
+                        return None;
+                    }
+                };
+
+                // Also fetch title (with shorter timeout)
+                let title = match tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    session.title()
+                ).await {
+                    Ok(Ok(t)) if !t.is_empty() => Some(t),
+                    _ => None,
+                };
+
+                Some(tasks::RefreshResult { tree, title })
+            });
+            self.pending_refresh.start(handle);
         }
-        Ok(())
     }
 
     // Media control methods
     async fn try_media_play_pause(&mut self) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(ref client) = self.state.current_tab().page_client {
-            let status = MediaController::get_status(client).await?;
+        if let Some(ref session) = self.state.current_tab().session {
+            let status = session.get_media_status().await?;
             if status.has_video {
-                let playing = MediaController::toggle_play(client).await?;
+                let playing = session.media_toggle_play().await?;
                 self.state.set_status(if playing { "▶ Playing" } else { "⏸ Paused" });
                 return Ok(true);
             }
@@ -1825,17 +1670,17 @@ impl Shell {
     }
 
     async fn media_toggle_mute(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(ref client) = self.state.current_tab().page_client {
-            let muted = MediaController::toggle_mute(client).await?;
+        if let Some(ref session) = self.state.current_tab().session {
+            let muted = session.media_toggle_mute().await?;
             self.state.set_status(if muted { "🔇 Muted" } else { "🔊 Unmuted" });
         }
         Ok(())
     }
 
     async fn media_seek(&mut self, seconds: f64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(ref client) = self.state.current_tab().page_client {
-            MediaController::seek_relative(client, seconds).await?;
-            let status = MediaController::get_status(client).await?;
+        if let Some(ref session) = self.state.current_tab().session {
+            session.media_seek(seconds).await?;
+            let status = session.get_media_status().await?;
             self.state.set_status(&format!(
                 "⏱ {} / {}",
                 MediaStatus::format_time(status.current_time),
@@ -1846,50 +1691,35 @@ impl Shell {
     }
 
     async fn media_seek_percent(&mut self, percent: u8) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(ref client) = self.state.current_tab().page_client {
-            MediaController::seek_percent(client, percent).await?;
+        if let Some(ref session) = self.state.current_tab().session {
+            session.media_seek_percent(percent).await?;
             self.state.set_status(&format!("⏱ Jumped to {}%", percent));
         }
         Ok(())
     }
 
     async fn media_adjust_volume(&mut self, delta: f64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(ref client) = self.state.current_tab().page_client {
-            let volume = MediaController::adjust_volume(client, delta).await?;
-            self.state.set_status(&format!("🔊 Volume: {}%", (volume * 100.0) as u8));
+        if let Some(ref session) = self.state.current_tab().session {
+            session.media_adjust_volume(delta).await?;
+            let status = session.get_media_status().await?;
+            self.state.set_status(&format!("🔊 Volume: {}%", (status.volume * 100.0) as u8));
         }
         Ok(())
     }
 
     async fn media_adjust_speed(&mut self, delta: f64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(ref client) = self.state.current_tab().page_client {
-            // Get current speed and adjust
-            let result = client.call("Runtime.evaluate", serde_json::json!({
-                "expression": r#"
-                    (function() {
-                        const v = document.querySelector('video');
-                        if (!v) return 1;
-                        return v.playbackRate;
-                    })()
-                "#,
-                "returnByValue": true
-            })).await?;
-
-            let current = result.get("result")
-                .and_then(|r| r.get("value"))
-                .and_then(|v| v.as_f64())
-                .unwrap_or(1.0);
-
-            let new_speed = (current + delta).max(0.25).min(3.0);
-            MediaController::set_speed(client, new_speed).await?;
+        if let Some(ref session) = self.state.current_tab().session {
+            let status = session.get_media_status().await?;
+            let new_speed = (status.playback_rate + delta).max(0.25).min(3.0);
+            session.media_set_speed(new_speed).await?;
             self.state.set_status(&format!("⏩ Speed: {:.2}x", new_speed));
         }
         Ok(())
     }
 
     async fn media_toggle_captions(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(ref client) = self.state.current_tab().page_client {
-            let enabled = MediaController::toggle_captions(client).await?;
+        if let Some(ref session) = self.state.current_tab().session {
+            let enabled = session.media_toggle_captions().await?;
             self.state.set_status(if enabled { "CC: On" } else { "CC: Off" });
         }
         Ok(())

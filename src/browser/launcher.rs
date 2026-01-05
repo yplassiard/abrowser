@@ -108,7 +108,7 @@ impl BrowserLauncher {
 
         let mut cmd = Command::new(&binary);
         cmd.args([
-            "--headless=new",
+            // "--headless=new",  // Disabled to test mouse events
             "--no-sandbox",
             "--disable-dev-shm-usage",
             // Accessibility
@@ -217,7 +217,7 @@ impl BrowserLauncher {
         loop {
             if start.elapsed() > timeout {
                 // If timeout, just proceed - page may already be loaded
-                eprintln!("Note: Timeout waiting for load event, proceeding anyway");
+                crate::utils::log::log("Note: Timeout waiting for load event, proceeding anyway");
                 break;
             }
 

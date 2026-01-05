@@ -3,34 +3,16 @@ From: abrowser <abrowser@example.com>
 Date: Thu, 1 Jan 2025 00:00:00 +0000
 Subject: [PATCH 1/3] Add abrowser library to Chromium build
 
-Adds symlinks and build configuration to integrate the abrowser
-Rust library with Chromium's headless shell.
+Adds build configuration to integrate the abrowser Rust library
+with Chromium's headless shell. Also disables Metal on macOS for
+SDK compatibility.
 ---
- abrowser/build   |  1 +
- abrowser/src     |  1 +
  headless/BUILD.gn | 15 ++++++++++++++-
- 3 files changed, 16 insertions(+), 1 deletion(-)
- create mode 120000 abrowser/build
- create mode 120000 abrowser/src
+ skia/BUILD.gn     |  7 ++++---
+ 2 files changed, 18 insertions(+), 4 deletions(-)
 
-diff --git a/abrowser/build b/abrowser/build
-new file mode 120000
-index 0000000000000..44735d5866459
---- /dev/null
-+++ b/abrowser/build
-@@ -0,0 +1 @@
-+../../../build
-\ No newline at end of file
-diff --git a/abrowser/src b/abrowser/src
-new file mode 120000
-index 0000000000000..dabb0e15a991e
---- /dev/null
-+++ b/abrowser/src
-@@ -0,0 +1 @@
-+../../../src
-\ No newline at end of file
 diff --git a/headless/BUILD.gn b/headless/BUILD.gn
-index bfae1e3290de0..8018111ed9898 100644
+index bfae1e3290..8caec4304b 100644
 --- a/headless/BUILD.gn
 +++ b/headless/BUILD.gn
 @@ -453,6 +453,7 @@ component("headless_non_renderer") {
@@ -68,6 +50,29 @@ index bfae1e3290de0..8018111ed9898 100644
 
    if (!headless_use_embedded_resources) {
      data = [
+diff --git a/skia/BUILD.gn b/skia/BUILD.gn
+index 1234567890..abcdef1234 100644
+--- a/skia/BUILD.gn
++++ b/skia/BUILD.gn
+@@ -531,12 +531,13 @@ component("skia") {
+   }
+
+   if (is_mac) {
+-    deps += [ ":skia_metal" ]
+-    defines += [ "SK_METAL" ]
++    # Disabled for SDK compatibility - Metal not needed for headless
++    # deps += [ ":skia_metal" ]
++    # defines += [ "SK_METAL" ]
+     frameworks = [
+       "AppKit.framework",
+       "CoreFoundation.framework",
+       "CoreGraphics.framework",
+       "CoreText.framework",
+-      "Metal.framework",
++      # "Metal.framework",
+       "Foundation.framework",
+     ]
+   }
 --
 2.39.0
 

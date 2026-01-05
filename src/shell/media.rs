@@ -200,7 +200,7 @@ impl MediaController {
 }
 
 /// Current media playback status
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct MediaStatus {
     pub has_video: bool,
     pub playing: bool,
@@ -212,6 +212,19 @@ pub struct MediaStatus {
 }
 
 impl MediaStatus {
+    /// Create from backend MediaStatus
+    pub fn from_backend(status: crate::backend::MediaStatus) -> Self {
+        Self {
+            has_video: status.has_video,
+            playing: status.playing,
+            current_time: status.current_time,
+            duration: status.duration,
+            muted: status.muted,
+            volume: status.volume,
+            title: String::new(), // Backend doesn't provide title
+        }
+    }
+
     /// Format current time as MM:SS
     pub fn format_time(seconds: f64) -> String {
         if seconds.is_nan() || seconds.is_infinite() {

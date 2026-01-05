@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+use crate::backend::BackendKind;
+
 /// Browser configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -15,6 +17,10 @@ pub struct Config {
     /// Viewport mode: "mobile" or "desktop"
     pub viewport_mode: ViewportMode,
 
+    /// Browser backend: "chromium" or "firefox"
+    #[serde(with = "backend_serde")]
+    pub backend: BackendKind,
+
     /// Key bindings for navigation mode
     pub navigation_keys: KeyBindings,
 
@@ -23,6 +29,27 @@ pub struct Config {
 
     /// Output settings
     pub output: OutputConfig,
+}
+
+/// Serde helper for BackendKind
+mod backend_serde {
+    use super::BackendKind;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(kind: &BackendKind, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&kind.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<BackendKind, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
 }
 
 /// Viewport mode for rendering
@@ -64,6 +91,7 @@ impl Default for Config {
         Self {
             search_engine: "https://duckduckgo.com/?q=%s".to_string(),
             viewport_mode: ViewportMode::default(),
+            backend: BackendKind::Chromium,
             navigation_keys: KeyBindings::default_navigation(),
             focus_keys: KeyBindings::default_focus(),
             output: OutputConfig::default(),

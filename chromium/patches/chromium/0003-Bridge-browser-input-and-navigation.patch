@@ -3,115 +3,78 @@ From: abrowser <abrowser@example.com>
 Date: Thu, 1 Jan 2025 00:00:00 +0000
 Subject: [PATCH 3/3] Bridge browser input and navigation
 
-Integrates the abrowser input handling and navigation with
-headless Chromium. This patch:
-1. Calls abrowser::Renderer::Main() early in startup
-2. Sets up input thread listening for terminal events
-3. Forwards navigation and focus events to/from the browser
+Integrates abrowser input handling with headless Chromium:
+1. Sets up input thread listening for terminal events
+2. Forwards mouse events using ForwardMouseEvent (trusted events)
+3. Forwards keyboard events using ForwardKeyboardEvent
+4. Handles navigation, scroll, and resize events
+
+Key: Uses ForwardMouseEvent/ForwardKeyboardEvent for trusted input
+events that work even on sites checking event.isTrusted.
 ---
- headless/app/headless_shell.cc                 |  12 +-
- headless/app/headless_shell_main.cc            |   6 +
- headless/lib/browser/headless_browser_impl.cc  | 220 +++++++++++++++++
- headless/lib/browser/headless_browser_impl.h   |  25 ++
- headless/lib/browser/headless_web_contents_impl.cc | 35 +++
- headless/lib/browser/headless_web_contents_impl.h  |   4 +
- 6 files changed, 298 insertions(+), 4 deletions(-)
+ headless/lib/browser/headless_browser_impl.cc | 294 ++++++++++++++++++++++++-
+ headless/lib/browser/headless_browser_impl.h  |  19 ++
+ 2 files changed, 311 insertions(+), 2 deletions(-)
 
-diff --git a/headless/app/headless_shell.cc b/headless/app/headless_shell.cc
-index 1234567890abc..fedcba0987654 100644
---- a/headless/app/headless_shell.cc
-+++ b/headless/app/headless_shell.cc
-@@ -10,6 +10,9 @@
- #include "headless/public/headless_browser.h"
- #include "headless/public/headless_browser_context.h"
-
-+// abrowser
-+#include "abrowser/src/browser/renderer.h"
-+
- namespace headless {
-
- HeadlessShell::HeadlessShell() = default;
-@@ -90,6 +93,9 @@ void HeadlessShell::OnBrowserStart(HeadlessBrowser* browser) {
-   HeadlessBrowserContext::Builder context_builder =
-       browser_->CreateBrowserContextBuilder();
-
-+  // abrowser: Set window size from terminal
-+  context_builder.SetWindowSize(abrowser::Renderer::GetCurrent()->GetSize());
-+
-   // Retrieve the locale set by InitApplicationLocale() in
-   // headless_content_main_delegate.cc in a way that is free of side-effects.
-   context_builder.SetAcceptLanguage(base::i18n::GetConfiguredLocale());
-@@ -113,10 +119,8 @@ void HeadlessShell::OnBrowserStart(HeadlessBrowser* browser) {
-
-   GURL target_url = ConvertArgumentToURL(args.front());
-
--  // Navigate to the target URL
--  HeadlessWebContents::Builder builder(
--      browser_context_->CreateWebContentsBuilder());
--  HeadlessWebContents* web_contents =
-+  HeadlessWebContents::Builder builder(browser_context_->CreateWebContentsBuilder());
-+  HeadlessWebContents* web_contents =
-       builder.SetInitialURL(target_url).Build();
-   if (!web_contents) {
-     LOG(ERROR) << "Navigation to " << target_url << " failed.";
-diff --git a/headless/app/headless_shell_main.cc b/headless/app/headless_shell_main.cc
-index 1234567890abc..fedcba0987654 100644
---- a/headless/app/headless_shell_main.cc
-+++ b/headless/app/headless_shell_main.cc
-@@ -13,7 +13,13 @@
- #include "sandbox/mac/seatbelt_exec.h"
- #endif
-
-+// abrowser
-+#include "abrowser/src/browser/renderer.h"
-+
- int main(int argc, const char** argv) {
-+  // Initialize abrowser before Chromium
-+  abrowser::Renderer::Main();
-+
- #if BUILDFLAG(IS_WIN)
-   sandbox::SandboxInterfaceInfo sandbox_info = {nullptr};
-   content::InitializeSandboxInfo(&sandbox_info);
 diff --git a/headless/lib/browser/headless_browser_impl.cc b/headless/lib/browser/headless_browser_impl.cc
-index fedcba0987654..abcdef123456 100644
+index 1a1223108b..b034f38eac 100644
 --- a/headless/lib/browser/headless_browser_impl.cc
 +++ b/headless/lib/browser/headless_browser_impl.cc
-@@ -7,6 +7,8 @@
+@@ -4,6 +4,8 @@
+ 
+ #include "headless/lib/browser/headless_browser_impl.h"
+ 
++#include <iostream>
++#include <signal.h>
  #include <string>
  #include <utility>
  #include <vector>
-+#include <iostream>
-+#include <signal.h>
-
- #include "base/callback_helpers.h"
- #include "base/command_line.h"
-@@ -29,6 +31,16 @@
- #include "url/gurl.h"
-
- // abrowser
+@@ -27,6 +29,25 @@
+ #include "services/network/public/cpp/network_switches.h"
+ #include "ui/events/devices/device_data_manager.h"
+ 
++// abrowser input handling
++#include "content/public/browser/native_web_keyboard_event.h"
 +#include "content/public/browser/render_frame_host.h"
 +#include "content/public/browser/render_view_host.h"
 +#include "content/public/browser/render_widget_host.h"
 +#include "content/public/browser/web_contents.h"
 +#include "third_party/blink/public/common/input/web_keyboard_event.h"
 +#include "third_party/blink/public/common/input/web_mouse_event.h"
++#include "third_party/blink/public/common/input/web_mouse_wheel_event.h"
 +#include "ui/events/keycodes/keyboard_codes.h"
++#include "ui/gfx/geometry/rect.h"
++#include "abrowser/src/browser/renderer.h"
 +
 +namespace abrowser_internal {
 +static headless::HeadlessBrowserImpl* g_browser = nullptr;
-+}
-
++static unsigned int g_mouse_x = 0;
++static unsigned int g_mouse_y = 0;
++}  // namespace abrowser_internal
++
  namespace headless {
-
-@@ -105,9 +117,217 @@ HeadlessBrowserImpl::~HeadlessBrowserImpl() {
-   if (input_thread_.joinable()) {
-     input_thread_.join();
-   }
+ 
+ HeadlessBrowserImpl::HeadlessBrowserImpl(
+@@ -38,7 +59,14 @@ HeadlessBrowserImpl::HeadlessBrowserImpl(
+       default_browser_context_(nullptr),
+       agent_host_(nullptr) {}
+ 
+-HeadlessBrowserImpl::~HeadlessBrowserImpl() = default;
++HeadlessBrowserImpl::~HeadlessBrowserImpl() {
++  if (input_thread_.joinable()) {
++    input_thread_.join();
++  }
 +  if (abrowser_internal::g_browser == this) {
 +    abrowser_internal::g_browser = nullptr;
 +  }
 +}
-+
+ 
+ HeadlessBrowserContext::Builder
+ HeadlessBrowserImpl::CreateBrowserContextBuilder() {
+@@ -91,6 +119,206 @@ void HeadlessBrowserImpl::set_browser_main_parts(
+   browser_main_parts_ = browser_main_parts;
+ }
+ 
 +void HeadlessBrowserImpl::Resize() {
 +  auto size = abrowser::Renderer::GetCurrent()->Resize();
 +  auto rect = gfx::Rect(0, 0, size.width(), size.height());
@@ -199,6 +162,8 @@ index fedcba0987654..abcdef123456 100644
 +      blink::WebMouseWheelEvent event;
 +      event.SetType(blink::WebInputEvent::Type::kMouseWheel);
 +      event.SetTimeStamp(base::TimeTicks::Now());
++      event.SetPositionInWidget(abrowser_internal::g_mouse_x,
++                                abrowser_internal::g_mouse_y);
 +      event.delta_y = delta;
 +      event.phase = blink::WebMouseWheelEvent::kPhaseBegan;
 +      host->ForwardWheelEvent(event);
@@ -234,18 +199,91 @@ index fedcba0987654..abcdef123456 100644
 +  }
 +}
 +
-+void HeadlessBrowserImpl::OnFocusNodeInput(int node_id) {
-+  // Focus a specific accessibility node
-+  auto* renderer = abrowser::Renderer::GetCurrent();
-+  renderer->SetFocus(node_id);
++void HeadlessBrowserImpl::OnMouseDownInput(unsigned int x, unsigned int y) {
++  abrowser_internal::g_mouse_x = x;
++  abrowser_internal::g_mouse_y = y;
++
++  for (auto* ctx : GetAllBrowserContexts()) {
++    for (auto* contents : ctx->GetAllWebContents()) {
++      auto* impl = HeadlessWebContentsImpl::From(contents);
++      if (!impl)
++        continue;
++      auto* host = impl->web_contents()->GetRenderViewHost()->GetWidget();
++      if (!host)
++        continue;
++
++      blink::WebMouseEvent event;
++      event.button = blink::WebMouseEvent::Button::kLeft;
++      event.click_count = 1;
++      event.SetType(blink::WebInputEvent::Type::kMouseDown);
++      event.SetTimeStamp(base::TimeTicks::Now());
++      event.SetPositionInWidget(x, y);
++      event.SetPositionInScreen(x, y);
++
++      host->ForwardMouseEvent(event);
++    }
++  }
 +}
 +
-+void HeadlessBrowserImpl::OnActivateNodeInput(int node_id) {
-+  // Activate (click) a specific accessibility node
-+  // This would typically trigger the default action for that node
- }
-
++void HeadlessBrowserImpl::OnMouseUpInput(unsigned int x, unsigned int y) {
++  abrowser_internal::g_mouse_x = x;
++  abrowser_internal::g_mouse_y = y;
++
++  for (auto* ctx : GetAllBrowserContexts()) {
++    for (auto* contents : ctx->GetAllWebContents()) {
++      auto* impl = HeadlessWebContentsImpl::From(contents);
++      if (!impl)
++        continue;
++      auto* host = impl->web_contents()->GetRenderViewHost()->GetWidget();
++      if (!host)
++        continue;
++
++      blink::WebMouseEvent event;
++      event.button = blink::WebMouseEvent::Button::kLeft;
++      event.click_count = 1;
++      event.SetType(blink::WebInputEvent::Type::kMouseUp);
++      event.SetTimeStamp(base::TimeTicks::Now());
++      event.SetPositionInWidget(x, y);
++      event.SetPositionInScreen(x, y);
++
++      host->ForwardMouseEvent(event);
++    }
++  }
++}
++
++void HeadlessBrowserImpl::OnMouseMoveInput(unsigned int x, unsigned int y) {
++  abrowser_internal::g_mouse_x = x;
++  abrowser_internal::g_mouse_y = y;
++
++  for (auto* ctx : GetAllBrowserContexts()) {
++    for (auto* contents : ctx->GetAllWebContents()) {
++      auto* impl = HeadlessWebContentsImpl::From(contents);
++      if (!impl)
++        continue;
++      auto* host = impl->web_contents()->GetRenderViewHost()->GetWidget();
++      if (!host)
++        continue;
++
++      blink::WebMouseEvent event;
++      event.SetType(blink::WebInputEvent::Type::kMouseMove);
++      event.SetTimeStamp(base::TimeTicks::Now());
++      event.SetPositionInWidget(x, y);
++      event.SetPositionInScreen(x, y);
++
++      host->ForwardMouseEvent(event);
++    }
++  }
++}
++
  void HeadlessBrowserImpl::RunOnStartCallback() {
+   // We don't support the tethering domain on this agent host.
+   agent_host_ = content::DevToolsAgentHost::CreateForBrowser(
+@@ -98,6 +326,70 @@ void HeadlessBrowserImpl::RunOnStartCallback() {
+ 
+   PlatformStart();
+   std::move(on_start_callback_).Run(this);
++
++  // abrowser: Setup input handling
 +  abrowser_internal::g_browser = this;
 +
 +  // Handle terminal resize
@@ -286,13 +324,17 @@ index fedcba0987654..abcdef123456 100644
 +          if (abrowser_internal::g_browser)
 +            abrowser_internal::g_browser->OnKeyPressInput(key);
 +        },
-+        .focus_node = [](int node_id) {
++        .mouse_down = [](unsigned int x, unsigned int y) {
 +          if (abrowser_internal::g_browser)
-+            abrowser_internal::g_browser->OnFocusNodeInput(node_id);
++            abrowser_internal::g_browser->OnMouseDownInput(x, y);
 +        },
-+        .activate_node = [](int node_id) {
++        .mouse_up = [](unsigned int x, unsigned int y) {
 +          if (abrowser_internal::g_browser)
-+            abrowser_internal::g_browser->OnActivateNodeInput(node_id);
++            abrowser_internal::g_browser->OnMouseUpInput(x, y);
++        },
++        .mouse_move = [](unsigned int x, unsigned int y) {
++          if (abrowser_internal::g_browser)
++            abrowser_internal::g_browser->OnMouseMoveInput(x, y);
 +        },
 +        .post_task = [](void (*fn)(void*), void* data) {
 +          if (abrowser_internal::g_browser) {
@@ -304,36 +346,35 @@ index fedcba0987654..abcdef123456 100644
 +
 +    abrowser::Renderer::GetCurrent()->Listen(&delegate);
 +  });
-+
-   // Original RunOnStartCallback code continues...
-   agent_host_ = content::DevToolsAgentHost::CreateForBrowser(
-       nullptr, content::DevToolsAgentHost::CreateServerSocketCallback());
+ }
+ 
+ HeadlessBrowserContext* HeadlessBrowserImpl::CreateBrowserContext(
 diff --git a/headless/lib/browser/headless_browser_impl.h b/headless/lib/browser/headless_browser_impl.h
-index 1234567890abc..fedcba0987654 100644
+index a2d531ab32..8618c532fa 100644
 --- a/headless/lib/browser/headless_browser_impl.h
 +++ b/headless/lib/browser/headless_browser_impl.h
-@@ -11,6 +11,7 @@
+@@ -10,6 +10,7 @@
+ 
  #include <memory>
  #include <string>
- #include <vector>
 +#include <thread>
-
+ #include <vector>
+ 
  #include "base/memory/weak_ptr.h"
- #include "base/task/single_thread_task_runner.h"
-@@ -27,6 +28,9 @@
- #include "headless/public/headless_browser_context.h"
+@@ -19,6 +20,9 @@
+ #include "headless/public/headless_devtools_target.h"
  #include "headless/public/headless_export.h"
-
+ 
 +// abrowser
 +#include "abrowser/src/browser/renderer.h"
 +
- namespace ui {
- class Compositor;
- }
-@@ -120,6 +124,27 @@ class HEADLESS_EXPORT HeadlessBrowserImpl : public HeadlessBrowser,
-
+ #if defined(HEADLESS_USE_PREFS)
+ class PrefService;
+ #endif
+@@ -123,7 +127,22 @@ class HEADLESS_EXPORT HeadlessBrowserImpl : public HeadlessBrowser,
+ 
    bool did_shutdown() const { return did_shutdown_; }
-
+ 
 +  // abrowser input handlers
 +  void Resize();
 +  void OnShutdownInput();
@@ -343,90 +384,15 @@ index 1234567890abc..fedcba0987654 100644
 +  void OnGoForwardInput();
 +  void OnScrollInput(int delta);
 +  void OnKeyPressInput(char key);
-+  void OnFocusNodeInput(int node_id);
-+  void OnActivateNodeInput(int node_id);
++  void OnMouseDownInput(unsigned int x, unsigned int y);
++  void OnMouseUpInput(unsigned int x, unsigned int y);
++  void OnMouseMoveInput(unsigned int x, unsigned int y);
 +
-+ protected:
+  protected:
 +  // Input handling thread
 +  std::thread input_thread_;
-+
-+#if BUILDFLAG(IS_MAC)
-+  std::unique_ptr<display::ScopedNativeScreen> screen_;
-+#endif
-+
-+ private:
-   HeadlessBrowserMainParts* browser_main_parts_ = nullptr;
-   base::OnceCallback<void(HeadlessBrowser*)> on_start_callback_;
-
-diff --git a/headless/lib/browser/headless_web_contents_impl.cc b/headless/lib/browser/headless_web_contents_impl.cc
-index fedcba0987654..abcdef123456 100644
---- a/headless/lib/browser/headless_web_contents_impl.cc
-+++ b/headless/lib/browser/headless_web_contents_impl.cc
-@@ -31,6 +31,7 @@
- #include "url/gurl.h"
-
- // abrowser accessibility
-+#include "content/public/browser/navigation_handle.h"
- #include "abrowser/src/browser/renderer.h"
- #include "content/browser/accessibility/browser_accessibility_manager.h"
- #include "content/browser/renderer_host/render_frame_host_impl.h"
-@@ -300,6 +301,40 @@ void HeadlessWebContentsImpl::OnAccessibilityUpdate(
-   renderer->UpdateAccessibilityTree(abrowser_nodes, root_id);
- }
-
-+void HeadlessWebContentsImpl::TitleWasSet(content::NavigationEntry* entry) {
-+  if (!web_contents() || !web_contents()->GetPrimaryMainFrame()->IsActive())
-+    return;
-+
-+  auto* renderer = abrowser::Renderer::GetCurrent();
-+  if (renderer && entry) {
-+    renderer->SetTitle(base::UTF16ToUTF8(entry->GetTitleForDisplay()));
-+  }
-+}
-+
-+void HeadlessWebContentsImpl::DidFinishNavigation(
-+    content::NavigationHandle* handle) {
-+  if (!handle->IsInMainFrame() || !web_contents() ||
-+      !web_contents()->GetPrimaryMainFrame()->IsActive())
-+    return;
-+
-+  auto* renderer = abrowser::Renderer::GetCurrent();
-+  if (!renderer)
-+    return;
-+
-+  auto& nav = web_contents()->GetController();
-+  renderer->PushNav(handle->GetURL().spec(), nav.CanGoBack(),
-+                    nav.CanGoForward());
-+
-+  // Re-setup accessibility bridge after navigation
-+  SetupAccessibilityBridge();
-+
-+  // Request initial accessibility tree
-+  auto* rfh = static_cast<content::RenderFrameHostImpl*>(
-+      web_contents()->GetPrimaryMainFrame());
-+  if (rfh) {
-+    rfh->NotifyAccessibilityUpdate();
-+  }
-+}
-+
- HeadlessWebContentsImpl::~HeadlessWebContentsImpl() {
-   web_contents_->Close();
-   web_contents_.reset();
-diff --git a/headless/lib/browser/headless_web_contents_impl.h b/headless/lib/browser/headless_web_contents_impl.h
-index fedcba0987654..abcdef123456 100644
---- a/headless/lib/browser/headless_web_contents_impl.h
-+++ b/headless/lib/browser/headless_web_contents_impl.h
-@@ -126,6 +126,10 @@ class HEADLESS_EXPORT HeadlessWebContentsImpl
-   void SetupAccessibilityBridge();
-   void OnAccessibilityUpdate(std::vector<ui::AXNodeData> nodes,
-                              int32_t root_id);
-+
-+  // Navigation and title updates
-+  void TitleWasSet(content::NavigationEntry* entry) override;
-+  void DidFinishNavigation(content::NavigationHandle* handle) override;
-
-   const raw_ptr<HeadlessBrowserImpl, DanglingUntriaged> browser_;
-   const raw_ptr<HeadlessBrowserContextImpl, DanglingUntriaged>
+ #if BUILDFLAG(IS_MAC)
+   std::unique_ptr<display::ScopedNativeScreen> screen_;
+ #endif
 --
 2.39.0
-

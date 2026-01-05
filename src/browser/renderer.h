@@ -22,8 +22,9 @@ struct abrowser_browser_delegate {
   void (*go_forward)();
   void (*scroll)(int delta);
   void (*key_press)(char key);
-  void (*focus_node)(int node_id);
-  void (*activate_node)(int node_id);
+  void (*mouse_down)(unsigned int x, unsigned int y);
+  void (*mouse_up)(unsigned int x, unsigned int y);
+  void (*mouse_move)(unsigned int x, unsigned int y);
   void (*post_task)(void (*fn)(void*), void* data);
 };
 

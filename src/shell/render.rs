@@ -4,230 +4,218 @@ use super::{BrowserState, Config, FocusMode};
 use crossterm::{
     cursor::{self, MoveTo},
     execute,
-    style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
-    terminal::{self, Clear, ClearType},
+    style::Print,
+    terminal,
 };
+use std::cell::RefCell;
 use std::io::{self, Write};
 
-/// Render the browser state to the terminal
+thread_local! {
+    /// Previous frame buffer for double buffering
+    static PREV_FRAME: RefCell<Vec<String>> = RefCell::new(Vec::new());
+}
+
+/// Render the browser state to the terminal with double buffering
 pub fn render(state: &BrowserState, _config: &Config) -> io::Result<()> {
     let mut stdout = io::stdout();
     let (width, height) = terminal::size()?;
+    let width = width as usize;
 
-    execute!(stdout, Clear(ClearType::All), MoveTo(0, 0))?;
+    // Build new frame in memory
+    let mut frame: Vec<String> = Vec::with_capacity(height as usize);
 
-    // Tab bar (line 0)
-    render_tab_bar(&mut stdout, state, width)?;
+    // Line 0: Tab bar
+    frame.push(build_tab_bar(state, width));
 
-    // URL bar (line 1)
-    render_url_bar(&mut stdout, state, width)?;
+    // Lines 1 to height-3: Content area
+    let content_height = height.saturating_sub(3) as usize;
+    let (content_lines, cursor_line) = build_content(state, width, content_height);
+    frame.extend(content_lines);
 
-    // Content area (lines 2 to height-2)
-    let content_height = height.saturating_sub(4) as usize;
-    let cursor_line = render_content(&mut stdout, state, width as usize, content_height)?;
+    // Line height-2: Input prompt or empty
+    frame.push(build_input_line(state, width));
 
-    // Status bar (last line)
-    execute!(stdout, MoveTo(0, height - 1))?;
-    render_status_bar(&mut stdout, state, width)?;
+    // Line height-1: Status bar
+    frame.push(build_status_bar(state, width));
 
-    // Input prompt if active
-    if let Some(ref prompt) = state.input_prompt {
-        execute!(stdout, MoveTo(0, height - 2))?;
-        execute!(
-            stdout,
-            SetBackgroundColor(Color::DarkBlue),
-            SetForegroundColor(Color::White),
-            Print(format!("{}{}", prompt, state.input_value)),
-            Print(" ".repeat((width as usize).saturating_sub(prompt.len() + state.input_value.chars().count()))),
-            ResetColor
-        )?;
-        // Position cursor at input_cursor position (count chars, not bytes)
+    // Compare with previous frame and only update changed lines
+    PREV_FRAME.with(|prev| {
+        let mut prev = prev.borrow_mut();
+
+        for (line_num, new_line) in frame.iter().enumerate() {
+            let needs_update = prev.get(line_num).map_or(true, |old| old != new_line);
+            if needs_update {
+                let _ = execute!(stdout, MoveTo(0, line_num as u16));
+                let _ = execute!(stdout, Print(new_line));
+            }
+        }
+
+        // Store current frame for next comparison
+        *prev = frame;
+    });
+
+    // Position cursor
+    let cursor_pos = if state.input_prompt.is_some() {
+        let prompt_len = state.input_prompt.as_ref().map_or(0, |p| p.len());
         let cursor_char_pos = state.input_value[..state.input_cursor].chars().count();
-        execute!(
-            stdout,
-            cursor::Show,
-            MoveTo((prompt.len() + cursor_char_pos) as u16, height - 2)
-        )?;
+        ((prompt_len + cursor_char_pos) as u16, height - 2)
     } else {
-        // Position cursor at beginning of current element (column 0, always)
-        // Ensure cursor_line is within visible content area
-        let safe_cursor_line = cursor_line.max(2).min(height - 2);
-        execute!(
-            stdout,
-            cursor::Show,
-            MoveTo(0, safe_cursor_line)
-        )?;
-    }
+        let safe_cursor_line = cursor_line.max(1).min(height - 2);
+        (0, safe_cursor_line)
+    };
 
+    execute!(stdout, cursor::Show, MoveTo(cursor_pos.0, cursor_pos.1))?;
     stdout.flush()
 }
 
-fn render_tab_bar(stdout: &mut io::Stdout, state: &BrowserState, width: u16) -> io::Result<()> {
-    execute!(
-        stdout,
-        SetBackgroundColor(Color::DarkGrey),
-        SetForegroundColor(Color::White)
-    )?;
-
-    let mut x = 0;
-    for (i, tab) in state.tabs.iter().enumerate() {
-        let title = if tab.title.is_empty() {
-            if tab.url.is_empty() {
-                "New Tab"
-            } else {
-                &tab.url
-            }
-        } else {
-            &tab.title
-        };
-
-        // Truncate title
-        let title: String = title.chars().take(20).collect();
-        let tab_text = format!(" {} {} ", i, title);
-
-        if i == state.current_tab_index {
-            execute!(
-                stdout,
-                SetBackgroundColor(Color::Blue),
-                SetForegroundColor(Color::White),
-                Print(&tab_text),
-                SetBackgroundColor(Color::DarkGrey)
-            )?;
-        } else {
-            execute!(stdout, Print(&tab_text))?;
-        }
-
-        x += tab_text.len() as u16;
-        if x >= width {
-            break;
-        }
-    }
-
-    // Fill rest of line
-    let remaining = (width as usize).saturating_sub(x as usize);
-    execute!(stdout, Print(" ".repeat(remaining)), ResetColor)?;
-
-    Ok(())
-}
-
-fn render_url_bar(stdout: &mut io::Stdout, state: &BrowserState, width: u16) -> io::Result<()> {
-    execute!(stdout, MoveTo(0, 1))?;
-
+/// Build tab bar line (returns plain string with ANSI codes)
+fn build_tab_bar(state: &BrowserState, width: usize) -> String {
     let tab = state.current_tab();
-    let mode_indicator = match state.focus_mode {
+
+    let tab_num = format!("[{}]", state.current_tab_index);
+    let mode = match state.focus_mode {
         FocusMode::Navigation => "[NAV]",
         FocusMode::Focus => "[FOC]",
     };
 
-    let url = if tab.url.is_empty() {
-        "about:blank"
+    let title = if tab.title.is_empty() {
+        if tab.url.is_empty() { "New Tab" } else { &tab.url }
     } else {
-        &tab.url
+        &tab.title
     };
 
-    // Truncate URL to fit
-    let max_url_len = (width as usize).saturating_sub(mode_indicator.len() + 3);
-    let display_url: String = if url.len() > max_url_len {
-        format!("{}...", &url[..max_url_len.saturating_sub(3)])
-    } else {
-        url.to_string()
-    };
+    let prefix_len = tab_num.len() + 1 + mode.len() + 1;
+    let max_title_len = width.saturating_sub(prefix_len + 1);
+    let display_title: String = title.chars().take(max_title_len).collect();
 
-    execute!(
-        stdout,
-        SetBackgroundColor(Color::Black),
-        SetForegroundColor(Color::Cyan),
-        Print(mode_indicator),
-        Print(" "),
-        SetForegroundColor(Color::White),
-        Print(&display_url),
-        Print(" ".repeat((width as usize).saturating_sub(mode_indicator.len() + 1 + display_url.len()))),
-        ResetColor
-    )?;
+    let used = prefix_len + display_title.chars().count();
+    let padding = width.saturating_sub(used);
 
-    Ok(())
+    format!(
+        "\x1b[48;5;240m\x1b[33m{}\x1b[0m\x1b[48;5;240m \x1b[36m{}\x1b[0m\x1b[48;5;240m \x1b[37m{}{}\x1b[0m",
+        tab_num, mode, display_title, " ".repeat(padding)
+    )
 }
 
-fn render_content(
-    stdout: &mut io::Stdout,
-    state: &BrowserState,
-    width: usize,
-    height: usize,
-) -> io::Result<u16> {
+/// Build input line
+fn build_input_line(state: &BrowserState, width: usize) -> String {
+    if let Some(ref prompt) = state.input_prompt {
+        let content = format!("{}{}", prompt, state.input_value);
+        let padding = width.saturating_sub(content.chars().count());
+        format!("\x1b[44m\x1b[37m{}{}\x1b[0m", content, " ".repeat(padding))
+    } else {
+        " ".repeat(width)
+    }
+}
+
+/// Build status bar line
+fn build_status_bar(state: &BrowserState, width: usize) -> String {
     let tab = state.current_tab();
-    let mut cursor_screen_line: u16 = 2; // Default to first content line
+
+    let position = if tab.node_count() > 0 {
+        format!("{}/{}", tab.cursor_index + 1, tab.node_count())
+    } else {
+        "0/0".to_string()
+    };
+
+    let media_info = if let Some(ref status) = state.media_status {
+        status.format_status()
+    } else {
+        String::new()
+    };
+
+    let element_info = if let Some(node) = tab.current_node() {
+        let role = node.role_str();
+        let name = node.name_str();
+        let max_len = if role.eq_ignore_ascii_case("link") { 60 } else { 30 };
+        format!("{}: {}", role, truncate(name, max_len))
+    } else {
+        String::new()
+    };
+
+    let left = format!(" {} | {}", position, state.status_message);
+    let center = if !media_info.is_empty() {
+        format!(" {} ", media_info)
+    } else {
+        String::new()
+    };
+    let right = format!("{} ", element_info);
+
+    let padding = width.saturating_sub(left.len() + center.len() + right.len());
+    let left_pad = padding / 2;
+    let right_pad = padding - left_pad;
+
+    format!(
+        "\x1b[48;5;240m\x1b[37m{}{}\x1b[33m{}\x1b[37m{}{}\x1b[0m",
+        left, " ".repeat(left_pad), center, " ".repeat(right_pad), right
+    )
+}
+
+/// Build content lines (returns lines and cursor screen line)
+fn build_content(state: &BrowserState, width: usize, height: usize) -> (Vec<String>, u16) {
+    let tab = state.current_tab();
+    let mut lines: Vec<String> = Vec::with_capacity(height);
+    let mut cursor_screen_line: u16 = 1;
     let mut cursor_found = false;
     let mut screen_line_idx: usize = 0;
-
-    // Build wrapped lines for visible content
     let mut node_idx = tab.scroll_offset;
 
     while screen_line_idx < height {
-        let screen_line = (screen_line_idx + 2) as u16;
-
         if let Some(node) = tab.get_node(node_idx) {
             let is_current = node_idx == tab.cursor_index;
             let role = node.role_str();
-            let name = node.name_str();
 
-            // Track cursor position (first line of current element)
             if is_current && !cursor_found {
-                cursor_screen_line = screen_line;
+                cursor_screen_line = (screen_line_idx + 1) as u16;
                 cursor_found = true;
             }
 
-            // Format based on role
-            let (prefix, content) = format_node(role, name);
+            let (prefix, content) = format_node(node);
             let full_line = format!("{}{}", prefix, content);
-
-            // Wrap the line
             let wrapped = wrap_text(&full_line, width);
-            let color = role_color(role);
+            let color_code = role_color_code(role);
 
             for (wrap_idx, line_part) in wrapped.iter().enumerate() {
                 if screen_line_idx >= height {
                     break;
                 }
 
-                let current_screen_line = (screen_line_idx + 2) as u16;
-                execute!(stdout, MoveTo(0, current_screen_line))?;
-
                 let indent = if wrap_idx > 0 { "  " } else { "" };
                 let indented_line = format!("{}{}", indent, line_part);
                 let indented_len = indented_line.chars().count();
+                let padding = " ".repeat(width.saturating_sub(indented_len));
 
-                if is_current {
-                    execute!(
-                        stdout,
-                        SetBackgroundColor(Color::Blue),
-                        SetForegroundColor(Color::White),
-                        Print(&indented_line),
-                        Print(" ".repeat(width.saturating_sub(indented_len))),
-                        ResetColor
-                    )?;
+                let line = if is_current {
+                    format!("\x1b[44m\x1b[37m{}{}\x1b[0m", indented_line, padding)
                 } else {
-                    execute!(
-                        stdout,
-                        SetForegroundColor(color),
-                        Print(&indented_line),
-                        Print(" ".repeat(width.saturating_sub(indented_len))),
-                        ResetColor
-                    )?;
-                }
+                    format!("{}{}{}\x1b[0m", color_code, indented_line, padding)
+                };
 
+                lines.push(line);
                 screen_line_idx += 1;
             }
 
             node_idx += 1;
         } else {
-            // No more nodes, fill remaining lines
-            execute!(stdout, MoveTo(0, screen_line))?;
-            execute!(stdout, Print(" ".repeat(width)))?;
+            lines.push(" ".repeat(width));
             screen_line_idx += 1;
         }
     }
 
-    Ok(cursor_screen_line)
+    (lines, cursor_screen_line)
+}
+
+/// Get ANSI color code for a role
+fn role_color_code(role: &str) -> &'static str {
+    match role.to_lowercase().as_str() {
+        "heading" => "\x1b[33m",      // Yellow
+        "link" => "\x1b[36m",          // Cyan
+        "button" => "\x1b[32m",        // Green
+        "checkbox" | "radiobutton" => "\x1b[35m", // Magenta
+        "textbox" | "textarea" | "textfield" | "combobox" => "\x1b[34m", // Blue
+        "navigation" | "main" | "banner" | "contentinfo" => "\x1b[90m", // Dark grey
+        _ => "\x1b[37m",               // White
+    }
 }
 
 /// Wrap text to fit within width, breaking at word boundaries when possible
@@ -299,91 +287,53 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-fn format_node(role: &str, name: &str) -> (&'static str, String) {
+fn format_node(node: &crate::accessibility::AXNode) -> (String, String) {
+    use crate::accessibility::Role;
+
+    let role = node.role_str();
+    let name = node.name_str();
+
     match role.to_lowercase().as_str() {
-        "heading" => ("# ", name.to_string()),
-        "link" => ("[", format!("{}]", name)),
-        "button" => ("<", format!("{}>", name)),
-        "checkbox" => ("[ ] ", name.to_string()),
-        "radiobutton" => ("( ) ", name.to_string()),
-        "textbox" | "textarea" | "textfield" => ("[____] ", name.to_string()),
-        "listitem" => ("  * ", name.to_string()),
-        "image" => ("[IMG: ", format!("{}]", name)),
-        "table" => ("TABLE: ", name.to_string()),
-        "navigation" => ("--- ", format!("{} ---", name)),
-        "main" => ("=== ", format!("{} ===", name)),
-        "paragraph" | "statictext" => ("", name.to_string()),
-        _ => ("", name.to_string()),
+        "heading" => {
+            // Use h1-h6 based on level (default to h2 if level is 0)
+            let level = if node.level > 0 && node.level <= 6 {
+                node.level
+            } else {
+                2
+            };
+            let prefix = format!("h{} ", level);
+
+            // If heading contains an interactive element, show combined format
+            if let Some(ref contained) = node.contains_role {
+                match contained {
+                    Role::Link => (format!("{}[", prefix), format!("{}]", name)),
+                    Role::Button => (format!("{}<", prefix), format!("{}>", name)),
+                    _ => (prefix, name.to_string()),
+                }
+            } else {
+                (prefix, name.to_string())
+            }
+        }
+        "link" => ("[".to_string(), format!("{}]", name)),
+        "button" => ("<".to_string(), format!("{}>", name)),
+        "checkbox" => ("[ ] ".to_string(), name.to_string()),
+        "radiobutton" => ("( ) ".to_string(), name.to_string()),
+        "textbox" | "textarea" | "textfield" => ("[____] ".to_string(), name.to_string()),
+        "listitem" => {
+            // Use numbered format if we have position info, otherwise use dash
+            if let Some(pos) = node.pos_in_set {
+                (format!("{}. ", pos), name.to_string())
+            } else {
+                ("- ".to_string(), name.to_string())
+            }
+        }
+        "image" => ("[IMG: ".to_string(), format!("{}]", name)),
+        "table" => ("TABLE: ".to_string(), name.to_string()),
+        "navigation" => ("--- ".to_string(), format!("{} ---", name)),
+        "main" => ("=== ".to_string(), format!("{} ===", name)),
+        "paragraph" | "statictext" => (String::new(), name.to_string()),
+        _ => (String::new(), name.to_string()),
     }
-}
-
-fn role_color(role: &str) -> Color {
-    match role.to_lowercase().as_str() {
-        "heading" => Color::Yellow,
-        "link" => Color::Cyan,
-        "button" => Color::Green,
-        "checkbox" | "radiobutton" => Color::Magenta,
-        "textbox" | "textarea" | "textfield" => Color::Blue,
-        "navigation" | "main" | "banner" | "contentinfo" => Color::DarkGrey,
-        _ => Color::White,
-    }
-}
-
-fn render_status_bar(stdout: &mut io::Stdout, state: &BrowserState, width: u16) -> io::Result<()> {
-    let tab = state.current_tab();
-
-    // Position indicator
-    let position = if tab.node_count() > 0 {
-        format!("{}/{}", tab.cursor_index + 1, tab.node_count())
-    } else {
-        "0/0".to_string()
-    };
-
-    // Media status (if playing)
-    let media_info = if let Some(ref status) = state.media_status {
-        status.format_status()
-    } else {
-        String::new()
-    };
-
-    // Current element info (show full text for links)
-    let element_info = if let Some(node) = tab.current_node() {
-        let role = node.role_str();
-        let name = node.name_str();
-        // Show more text for links since URLs/link text can be important
-        let max_len = if role.eq_ignore_ascii_case("link") { 60 } else { 30 };
-        format!("{}: {}", role, truncate(name, max_len))
-    } else {
-        String::new()
-    };
-
-    let left = format!(" {} | {}", position, state.status_message);
-    let center = if !media_info.is_empty() {
-        format!(" {} ", media_info)
-    } else {
-        String::new()
-    };
-    let right = format!("{} ", element_info);
-
-    let padding = (width as usize).saturating_sub(left.len() + center.len() + right.len());
-    let left_pad = padding / 2;
-    let right_pad = padding - left_pad;
-
-    execute!(
-        stdout,
-        SetBackgroundColor(Color::DarkGrey),
-        SetForegroundColor(Color::White),
-        Print(&left),
-        Print(" ".repeat(left_pad)),
-        SetForegroundColor(Color::Yellow),
-        Print(&center),
-        SetForegroundColor(Color::White),
-        Print(" ".repeat(right_pad)),
-        Print(&right),
-        ResetColor
-    )?;
-
-    Ok(())
 }
 
 fn truncate(s: &str, max_len: usize) -> String {

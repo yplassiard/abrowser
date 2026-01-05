@@ -92,13 +92,22 @@ get_depot_tools() {
     echo "=== Step 1: Getting depot_tools ==="
 
     if [ -d "$DEPOT_TOOLS_DIR" ]; then
-        echo "depot_tools already exists, skipping"
+        echo "depot_tools already exists"
     else
         echo "Cloning depot_tools..."
         git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_DIR"
     fi
 
     export PATH="$DEPOT_TOOLS_DIR:$PATH"
+
+    # Ensure depot_tools is initialized
+    if [ ! -f "$DEPOT_TOOLS_DIR/python3_bin_reldir.txt" ]; then
+        echo "Initializing depot_tools..."
+        cd "$DEPOT_TOOLS_DIR"
+        ./update_depot_tools
+        cd "$SCRIPT_DIR"
+    fi
+
     echo "depot_tools OK"
     echo ""
 }
@@ -245,7 +254,12 @@ v8_symbol_level=0
 treat_warnings_as_errors=false
 "
 
-    if [ "$OS" = "Linux" ]; then
+    if [ "$OS" = "Darwin" ]; then
+        GN_ARGS+="
+enable_swiftshader=false
+angle_enable_swiftshader=false
+"
+    elif [ "$OS" = "Linux" ]; then
         GN_ARGS+="
 use_sysroot=false
 use_glib=true

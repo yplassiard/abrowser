@@ -2,8 +2,10 @@
 /target/
 /build/
 
-# Chromium source (fetched separately)
+# Chromium source (fetched separately, but keep patches)
 /chromium/src/
+/chromium/.gclient
+/depot_tools/
 
 # IDE
 .idea/
@@ -22,4 +24,3 @@ Thumbs.db
 # Local config
 .env
 .env.local
-chromium/

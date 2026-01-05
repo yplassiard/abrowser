@@ -1,0 +1,20 @@
+diff --git a/ui/gfx/hdr_metadata_mac.mm b/ui/gfx/hdr_metadata_mac.mm
+index b3ed229c76..ab5a0f2375 100644
+--- a/ui/gfx/hdr_metadata_mac.mm
++++ b/ui/gfx/hdr_metadata_mac.mm
+@@ -5,6 +5,15 @@
+ #include "ui/gfx/hdr_metadata_mac.h"
+ #include "ui/gfx/hdr_metadata.h"
+ 
++// Workaround for newer macOS SDKs missing __sincospif/__sincospi
++#include <math.h>
++#ifndef __sincospif
++#define __sincospif(x, sinp, cosp) __sincosf((x) * M_PI, sinp, cosp)
++#endif
++#ifndef __sincospi
++#define __sincospi(x, sinp, cosp) __sincos((x) * M_PI, sinp, cosp)
++#endif
++
+ #include <simd/simd.h>
+ 
+ namespace gfx {

@@ -19,6 +19,26 @@ index 9e6681577b..04908a6fb3 100644
  #include <MetalKit/MetalKit.h>
  
  #include "base/mac/foundation_util.h"
+diff --git a/media/base/mac/color_space_util_mac.mm b/media/base/mac/color_space_util_mac.mm
+index 5074bb05f2..50e07e4f1e 100644
+--- a/media/base/mac/color_space_util_mac.mm
++++ b/media/base/mac/color_space_util_mac.mm
+@@ -4,6 +4,15 @@
+ 
+ #include "media/base/mac/color_space_util_mac.h"
+ 
++// Workaround for newer macOS SDKs missing __sincospif/__sincospi
++#include <math.h>
++#ifndef __sincospif
++#define __sincospif(x, sinp, cosp) __sincosf((x) * M_PI, sinp, cosp)
++#endif
++#ifndef __sincospi
++#define __sincospi(x, sinp, cosp) __sincos((x) * M_PI, sinp, cosp)
++#endif
++
+ #include <simd/simd.h>
+ #include <vector>
+ 
 diff --git a/ui/gfx/hdr_metadata_mac.mm b/ui/gfx/hdr_metadata_mac.mm
 index b3ed229c76..ab5a0f2375 100644
 --- a/ui/gfx/hdr_metadata_mac.mm

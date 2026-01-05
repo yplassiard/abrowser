@@ -56,13 +56,17 @@ install_dependencies() {
             sudo apt-get update
             sudo apt-get install -y \
                 git python3 python3-pip curl wget \
-                build-essential clang lld \
+                build-essential clang lld ninja-build \
+                pkg-config \
                 libglib2.0-dev libgtk-3-dev \
                 libnss3-dev libatk1.0-dev libatk-bridge2.0-dev \
                 libcups2-dev libdrm-dev libxkbcommon-dev \
                 libxcomposite-dev libxdamage-dev libxrandr-dev \
                 libgbm-dev libasound2-dev libpango1.0-dev \
-                libcairo2-dev libfontconfig1-dev
+                libcairo2-dev libfontconfig1-dev \
+                libgnome-keyring-dev libsecret-1-dev \
+                libxss-dev libxtst-dev \
+                libpulse-dev libudev-dev
         else
             echo "Unsupported Linux distribution. Please install dependencies manually."
             exit 1

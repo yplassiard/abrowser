@@ -1,0 +1,77 @@
+diff --git a/ui/accessibility/platform/browser_accessibility_cocoa.mm b/ui/accessibility/platform/browser_accessibility_cocoa.mm
+index b44e0e71b8..d1bf0559b3 100644
+--- a/ui/accessibility/platform/browser_accessibility_cocoa.mm
++++ b/ui/accessibility/platform/browser_accessibility_cocoa.mm
+@@ -66,11 +66,13 @@
+ namespace {
+ 
+ // Private WebKit accessibility attributes.
++// Note: macOS 26+ SDK defines some of these officially, so we use k prefix
++// to avoid ambiguity conflicts.
+ NSString* const
+-    NSAccessibilityUIElementCountForSearchPredicateParameterizedAttribute =
++    kAXUIElementCountForSearchPredicateParameterizedAttribute =
+         @"AXUIElementCountForSearchPredicate";
+ NSString* const
+-    NSAccessibilityUIElementsForSearchPredicateParameterizedAttribute =
++    kAXUIElementsForSearchPredicateParameterizedAttribute =
+         @"AXUIElementsForSearchPredicate";
+ 
+ // Private attributes for text markers.
+@@ -197,7 +199,8 @@
+ // const NSAccessibilityValueAutofillTypeAttribute = @"AXValueAutofillType";
+ 
+ // Actions.
+-NSString* const NSAccessibilityScrollToVisibleAction = @"AXScrollToVisible";
++// Note: macOS 26+ SDK defines kAXScrollToVisibleAction officially.
++NSString* const kAXScrollToVisibleAction = @"AXScrollToVisible";
+ 
+ // A mapping from an accessibility attribute to its method name.
+ NSDictionary* gAttributeToMethodNameMap = nil;
+@@ -2094,7 +2097,7 @@ - (id)accessibilityAttributeValue:(NSString*)attribute
+ 
+   if ([attribute
+           isEqualToString:
+-              NSAccessibilityUIElementCountForSearchPredicateParameterizedAttribute]) {
++              kAXUIElementCountForSearchPredicateParameterizedAttribute]) {
+     OneShotAccessibilityTreeSearch search(_owner);
+     if (InitializeAccessibilityTreeSearch(&search, parameter))
+       return @(search.CountMatches());
+@@ -2103,7 +2106,7 @@ - (id)accessibilityAttributeValue:(NSString*)attribute
+ 
+   if ([attribute
+           isEqualToString:
+-              NSAccessibilityUIElementsForSearchPredicateParameterizedAttribute]) {
++              kAXUIElementsForSearchPredicateParameterizedAttribute]) {
+     OneShotAccessibilityTreeSearch search(_owner);
+     if (InitializeAccessibilityTreeSearch(&search, parameter)) {
+       size_t count = search.CountMatches();
+@@ -2286,8 +2289,8 @@ - (NSArray*)accessibilityParameterizedAttributeNames {
+     NSAccessibilityIndexForChildUIElementParameterizedAttribute,
+     NSAccessibilityBoundsForRangeParameterizedAttribute,
+     NSAccessibilityStringForRangeParameterizedAttribute,
+-    NSAccessibilityUIElementCountForSearchPredicateParameterizedAttribute,
+-    NSAccessibilityUIElementsForSearchPredicateParameterizedAttribute,
++    kAXUIElementCountForSearchPredicateParameterizedAttribute,
++    kAXUIElementsForSearchPredicateParameterizedAttribute,
+     NSAccessibilitySelectTextWithCriteriaParameterizedAttribute
+   ] mutableCopy];
+ 
+@@ -2335,7 +2338,7 @@ - (NSArray*)accessibilityActionNames {
+ 
+   NSMutableArray* actions = [NSMutableArray
+       arrayWithObjects:NSAccessibilityShowMenuAction,
+-                       NSAccessibilityScrollToVisibleAction, nil];
++                       kAXScrollToVisibleAction, nil];
+ 
+   // VoiceOver expects the "press" action to be first.
+   if (_owner->IsClickable())
+@@ -2620,7 +2623,7 @@ - (void)accessibilityPerformAction:(NSString*)action {
+     node->SetData(data);  // Set the data back in the node.
+   } else if ([action isEqualToString:NSAccessibilityShowMenuAction]) {
+     manager->ShowContextMenu(*actionTarget);
+-  } else if ([action isEqualToString:NSAccessibilityScrollToVisibleAction]) {
++  } else if ([action isEqualToString:kAXScrollToVisibleAction]) {
+     manager->ScrollToMakeVisible(*actionTarget, gfx::Rect());
+   } else if ([action isEqualToString:NSAccessibilityIncrementAction]) {
+     manager->Increment(*actionTarget);

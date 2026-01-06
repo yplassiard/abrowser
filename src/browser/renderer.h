@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "abrowser/src/browser/export.h"
+#include "base/memory/raw_ptr_exclusion.h"
 #include "ui/gfx/geometry/size.h"
 
 extern "C" {
@@ -83,7 +84,8 @@ class ABROWSER_RENDERER_EXPORT Renderer {
  private:
   explicit Renderer(struct abrowser_bridge* ptr);
 
-  struct abrowser_bridge* ptr_;
+  // FFI pointer to Rust-side renderer - not suitable for raw_ptr<T>
+  RAW_PTR_EXCLUSION struct abrowser_bridge* ptr_;
 };
 
 }  // namespace abrowser

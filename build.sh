@@ -165,10 +165,21 @@ apply_patches() {
         echo "Created abrowser symlinks"
     fi
 
-    # Apply patches
+    # Apply patches - handle platform-specific patches
     for patch in "$PATCHES_DIR"/*.patch; do
         if [ -f "$patch" ]; then
             PATCH_NAME=$(basename "$patch")
+
+            # Skip platform-specific patches for wrong platform
+            if [[ "$PATCH_NAME" == *"-macos.patch" ]] && [ "$OS" != "Darwin" ]; then
+                echo "Skipping macOS-specific patch: $PATCH_NAME"
+                continue
+            fi
+            if [[ "$PATCH_NAME" == *"-linux.patch" ]] && [ "$OS" != "Linux" ]; then
+                echo "Skipping Linux-specific patch: $PATCH_NAME"
+                continue
+            fi
+
             echo "Applying $PATCH_NAME..."
 
             # Check if already applied

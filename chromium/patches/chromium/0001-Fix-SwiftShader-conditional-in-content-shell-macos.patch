@@ -1,0 +1,39 @@
+diff --git a/content/shell/BUILD.gn b/content/shell/BUILD.gn
+index 7adc7cdd12..9137ff6a24 100644
+--- a/content/shell/BUILD.gn
++++ b/content/shell/BUILD.gn
+@@ -902,8 +902,10 @@ if (is_mac) {
+     bundle_deps = [
+       ":content_shell_framework_helpers",
+       ":content_shell_framework_resources",
+-      ":content_shell_swiftshader_binaries",
+     ]
++    if (enable_swiftshader) {
++      bundle_deps += [ ":content_shell_swiftshader_binaries" ]
++    }
+ 
+     if (enable_ppapi) {
+       deps += [ ":content_shell_framework_plugins" ]
+@@ -1032,13 +1034,15 @@ if (is_mac) {
+   }
+ 
+   # Add the SwiftShader .dylibs in the Libraries directory of the Framework.
+-  bundle_data("content_shell_swiftshader_binaries") {
+-    sources = [
+-      "$root_out_dir/vk_intermediates/libvk_swiftshader.dylib",
+-      "$root_out_dir/vk_intermediates/vk_swiftshader_icd.json",
+-    ]
+-    outputs = [ "{{bundle_contents_dir}}/Libraries/{{source_file_part}}" ]
+-    public_deps = [ "//ui/gl:swiftshader_vk_library_copy" ]
++  if (enable_swiftshader) {
++    bundle_data("content_shell_swiftshader_binaries") {
++      sources = [
++        "$root_out_dir/vk_intermediates/libvk_swiftshader.dylib",
++        "$root_out_dir/vk_intermediates/vk_swiftshader_icd.json",
++      ]
++      outputs = [ "{{bundle_contents_dir}}/Libraries/{{source_file_part}}" ]
++      public_deps = [ "//ui/gl:swiftshader_vk_library_copy" ]
++    }
+   }
+ }
+ 

@@ -1,0 +1,69 @@
+diff --git a/gpu/ipc/service/image_transport_surface_overlay_mac.h b/gpu/ipc/service/image_transport_surface_overlay_mac.h
+index 36322ddd30..9de8715f73 100644
+--- a/gpu/ipc/service/image_transport_surface_overlay_mac.h
++++ b/gpu/ipc/service/image_transport_surface_overlay_mac.h
+@@ -15,6 +15,7 @@
+ #include "ui/gl/gl_bindings.h"
+ #include "ui/gl/gl_surface.h"
+ #include "ui/gl/presenter.h"
++#include "skia/buildflags.h"
+ 
+ // Put ui/display/mac/display_link_mac.h after ui/gl/gl_xxx.h. There is a
+ // conflict between macOS sdk gltypes.h and third_party/mesa_headers/GL/glext.h.
+@@ -107,7 +108,9 @@ class ImageTransportSurfaceOverlayMacEGL : public gl::Presenter {
+ 
+   int cap_max_pending_swaps_ = 1;
+ 
++#if BUILDFLAG(SKIA_USE_DAWN)
+   raw_ptr<DawnContextProvider> dawn_context_provider_ = nullptr;
++#endif
+ 
+   base::WeakPtrFactory<ImageTransportSurfaceOverlayMacEGL> weak_ptr_factory_;
+ };
+diff --git a/gpu/ipc/service/image_transport_surface_overlay_mac.mm b/gpu/ipc/service/image_transport_surface_overlay_mac.mm
+index fb57fbe86c..6e1fddd072 100644
+--- a/gpu/ipc/service/image_transport_surface_overlay_mac.mm
++++ b/gpu/ipc/service/image_transport_surface_overlay_mac.mm
+@@ -4,8 +4,11 @@
+ 
+ #include "gpu/ipc/service/image_transport_surface_overlay_mac.h"
+ 
++#include "skia/buildflags.h"
++#if BUILDFLAG(SKIA_USE_DAWN)
+ #include <dawn/native/MetalBackend.h>
+ #include <dawn/webgpu_cpp.h>
++#endif
+ 
+ #include <memory>
+ #include <sstream>
+@@ -70,7 +73,11 @@ void RecordVSyncCallbackDelay(base::TimeDelta delay) {
+ 
+ ImageTransportSurfaceOverlayMacEGL::ImageTransportSurfaceOverlayMacEGL(
+     DawnContextProvider* dawn_context_provider)
+-    : dawn_context_provider_(dawn_context_provider), weak_ptr_factory_(this) {
++    :
++#if BUILDFLAG(SKIA_USE_DAWN)
++      dawn_context_provider_(dawn_context_provider),
++#endif
++      weak_ptr_factory_(this) {
+   static bool av_disabled_at_command_line =
+       !base::FeatureList::IsEnabled(kAVFoundationOverlays);
+ 
+@@ -124,13 +131,16 @@ void RecordVSyncCallbackDelay(base::TimeDelta delay) {
+     // With SkiaGraphite, we pass the Graphite-Dawn MTLDevice for creating
+     // CAMetalLayer used to display HDR IOSurfaces. With SkiaGanesh, we pass the
+     // ANGLE MTLDevice instead.
++#if BUILDFLAG(SKIA_USE_DAWN)
+     if (dawn_context_provider_ &&
+         dawn_context_provider_->backend_type() == wgpu::BackendType::Metal) {
+       id<MTLDevice> metal_device = dawn::native::metal::GetMTLDevice(
+           dawn_context_provider_->GetDevice().Get());
+       ca_layer_tree_coordinator_->GetPendingCARendererLayerTree()
+           ->SetMetalDevice(metal_device);
+-    } else {
++    } else
++#endif
++    {
+       EGLAttrib angle_device_attrib = 0;
+       if (eglQueryDisplayAttribEXT(display->GetDisplay(), EGL_DEVICE_EXT,
+                                    &angle_device_attrib)) {

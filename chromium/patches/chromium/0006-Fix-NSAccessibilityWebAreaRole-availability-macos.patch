@@ -1,5 +1,5 @@
 diff --git a/ui/accessibility/platform/ax_private_roles_mac.h b/ui/accessibility/platform/ax_private_roles_mac.h
-index c2ae276e8c..138db74f16 100644
+index c2ae276e8c..ce66134815 100644
 --- a/ui/accessibility/platform/ax_private_roles_mac.h
 +++ b/ui/accessibility/platform/ax_private_roles_mac.h
 @@ -10,7 +10,12 @@
@@ -10,7 +10,7 @@ index c2ae276e8c..138db74f16 100644
 +// We use our own constant to avoid availability conflicts with older deployment targets.
  COMPONENT_EXPORT(AX_PLATFORM)
 -constexpr NSString* const NSAccessibilityWebAreaRole = @"AXWebArea";
-+constexpr NSString* const kAXWebAreaRole = @"AXWebArea";
++inline constexpr NSString* const kAXWebAreaRole = @"AXWebArea";
 +
 +// Map to our constant to avoid SDK availability issues
 +#define NSAccessibilityWebAreaRole kAXWebAreaRole

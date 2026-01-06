@@ -1,0 +1,31 @@
+diff --git a/third_party/crc32c/BUILD.gn b/third_party/crc32c/BUILD.gn
+index c745a5f86c..c4d31780cd 100644
+--- a/third_party/crc32c/BUILD.gn
++++ b/third_party/crc32c/BUILD.gn
+@@ -40,7 +40,9 @@ config("crc32c_config") {
+     defines += [ "HAVE_BUILTIN_PREFETCH=0" ]
+   }
+ 
+-  if (current_cpu == "arm64") {
++  # Disable ARM64 CRC32C on macOS due to Xcode clang compatibility issues
++  # with vmull_p64 intrinsics. The portable implementation works fine.
++  if (current_cpu == "arm64" && !is_mac) {
+     defines += [ "HAVE_ARM64_CRC32C=1" ]
+   } else {
+     defines += [ "HAVE_ARM64_CRC32C=0" ]
+@@ -69,10 +71,14 @@ source_set("crc32c") {
+ 
+   configs += [ ":crc32c_config" ]
+   deps = [
+-    ":crc32c_arm64",
+     ":crc32c_internal_headers",
+     ":crc32c_sse42",
+   ]
++
++  # Only include ARM64 CRC32C on non-Mac platforms due to Xcode clang issues
++  if (current_cpu == "arm64" && !is_mac) {
++    deps += [ ":crc32c_arm64" ]
++  }
+ }
+ 
+ source_set("crc32c_sse42") {

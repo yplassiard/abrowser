@@ -17,6 +17,7 @@ url = "2.5"
 crossterm = "0.28"
 toml = "0.8"
 dirs = "5.0"
+term_size = "0.3"
 
 [[bin]]
 name = "abrowser"
@@ -25,4 +26,4 @@ path = "src/main.rs"
 [lib]
 name = "abrowser"
 path = "src/lib.rs"
-crate-type = ["cdylib", "rlib"]
+crate-type = ["staticlib", "rlib"]

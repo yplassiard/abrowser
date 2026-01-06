@@ -4,5 +4,6 @@
 //! Unlike Carbonyl, we focus on the accessibility tree rather than pixel rendering.
 
 mod launcher;
+pub mod ffi;
 
 pub use launcher::BrowserLauncher;

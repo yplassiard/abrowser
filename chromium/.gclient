@@ -1,13 +1,9 @@
 solutions = [
   {
     "name": "src",
-    "url": "https://chromium.googlesource.com/chromium/src.git@111.0.5511.1",
+    "url": "https://chromium.googlesource.com/chromium/src.git@131.0.6778.204",
     "managed": False,
     "custom_deps": {},
-    "custom_vars": {
-      "use_rust": True,
-      "checkout_pgo_profiles": True,
-      "checkout_nacl": False,
-    }
+    "custom_vars": {},
   },
 ]

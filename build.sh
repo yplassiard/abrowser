@@ -11,8 +11,8 @@ CHROMIUM_SRC="$CHROMIUM_DIR/src"
 PATCHES_DIR="$SCRIPT_DIR/chromium/patches/chromium"
 DEPOT_TOOLS_DIR="$SCRIPT_DIR/depot_tools"
 
-# Chromium version to build against
-CHROMIUM_VERSION="120.0.6099.224"
+# Chromium version to build against (use recent stable for Xcode 26 compatibility)
+CHROMIUM_VERSION="131.0.6778.204"
 
 # abrowser version
 ABROWSER_VERSION="0.1.0"
@@ -261,8 +261,10 @@ angle_enable_swiftshader=false
 enable_swiftshader_vulkan=false
 angle_enable_vulkan=false
 use_dawn=false
-use_crashpad=false
+skia_use_dawn=false
 enable_vr=false
+skia_use_metal=false
+angle_enable_metal=false
 "
     elif [ "$OS" = "Linux" ]; then
         GN_ARGS+="

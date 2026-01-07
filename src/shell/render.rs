@@ -329,8 +329,37 @@ fn format_node(node: &crate::accessibility::AXNode) -> (String, String) {
         }
         "image" => ("[IMG: ".to_string(), format!("{}]", name)),
         "table" => ("TABLE: ".to_string(), name.to_string()),
-        "navigation" => ("--- ".to_string(), format!("{} ---", name)),
-        "main" => ("=== ".to_string(), format!("{} ===", name)),
+        "navigation" => {
+            let label = if name.is_empty() { "Navigation" } else { name };
+            ("--- ".to_string(), format!("{} ---", label))
+        }
+        "main" => {
+            let label = if name.is_empty() { "Main" } else { name };
+            ("=== ".to_string(), format!("{} ===", label))
+        }
+        "banner" => {
+            let label = if name.is_empty() { "Banner" } else { name };
+            ("^^^ ".to_string(), format!("{} ^^^", label))
+        }
+        "contentinfo" => {
+            let label = if name.is_empty() { "Footer" } else { name };
+            ("___ ".to_string(), format!("{} ___", label))
+        }
+        "region" | "section" => {
+            if !name.is_empty() {
+                ("--- ".to_string(), format!("{} ---", name))
+            } else {
+                (String::new(), String::new()) // Skip unnamed regions
+            }
+        }
+        "complementary" => {
+            let label = if name.is_empty() { "Aside" } else { name };
+            ("... ".to_string(), format!("{} ...", label))
+        }
+        "search" => {
+            let label = if name.is_empty() { "Search" } else { name };
+            ("@@@ ".to_string(), format!("{} @@@", label))
+        }
         "paragraph" | "statictext" => (String::new(), name.to_string()),
         _ => (String::new(), name.to_string()),
     }

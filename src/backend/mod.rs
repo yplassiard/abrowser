@@ -15,7 +15,7 @@
 //! ```ignore
 //! use abrowser::backend::{create_launcher, BackendKind};
 //!
-//! let mut launcher = create_launcher(BackendKind::Chromium, None)?;
+//! let mut launcher = create_launcher(BackendKind::Chromium, None, None)?;
 //! launcher.launch().await?;
 //! let session = launcher.create_page("https://example.com").await?;
 //! let tree = session.get_accessibility_tree().await?;

@@ -53,8 +53,9 @@ impl Shell {
         let viewport_mode = config.viewport_mode;
         let (width, height) = viewport_mode.dimensions();
         let backend = config.backend;
+        let profile_path = config.profile_path.as_ref().map(|_| config.get_profile_path());
 
-        let launcher = create_launcher(backend, Some((width, height)))?;
+        let launcher = create_launcher(backend, Some((width, height)), profile_path)?;
 
         Ok(Self {
             state: BrowserState::new().with_viewport(viewport_mode),

@@ -275,6 +275,20 @@ impl PageSession for ChromiumSession {
         let backend_id = Self::get_backend_node_id(handle)
             .ok_or_else(|| BackendError::InvalidHandle("Not a Chromium node handle".into()))?;
 
+        // Debug: Get element info before clicking
+        let describe_result = self.client
+            .call("DOM.describeNode", json!({ "backendNodeId": backend_id, "depth": 0 }))
+            .await;
+        if let Ok(desc) = &describe_result {
+            if let Some(node) = desc.get("node") {
+                let tag = node.get("nodeName").and_then(|v| v.as_str()).unwrap_or("?");
+                let attrs = node.get("attributes").and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(" "))
+                    .unwrap_or_default();
+                crate::utils::log::log(&format!("[DEBUG] Click target: <{}> attrs=[{}]", tag, attrs));
+            }
+        }
+
         // Scroll element into view first
         let _ = self.client
             .call("DOM.scrollIntoViewIfNeeded", json!({ "backendNodeId": backend_id }))
@@ -302,24 +316,29 @@ impl PageSession for ChromiumSession {
                 let x3 = first_quad.get(4).and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let y3 = first_quad.get(5).and_then(|v| v.as_f64()).unwrap_or(0.0);
 
-                let center_x = (x1 + x3) / 2.0;
-                let center_y = (y1 + y3) / 2.0;
+                // Click near top-left corner (offset by 5px) to avoid hitting child elements like icons
+                let center_x = x1 + 5.0;
+                let center_y = y1 + 5.0;
 
                 crate::utils::log::log(&format!("[DEBUG] Click at viewport ({}, {})", center_x, center_y));
 
-                // Use CDP Input.dispatchMouseEvent for trusted events
-                // Full sequence: mouseMoved -> mousePressed -> mouseReleased
-                self.client
-                    .call("Input.dispatchMouseEvent", json!({
-                        "type": "mouseMoved",
-                        "x": center_x,
-                        "y": center_y
+                // Debug: Check what element is at these coordinates
+                let element_check = self.client
+                    .call("Runtime.evaluate", json!({
+                        "expression": format!(
+                            "(function() {{ var el = document.elementFromPoint({}, {}); return el ? '<' + el.tagName + '>' + (el.id ? '#'+el.id : '') + (el.className ? '.'+el.className : '') + ' aria-expanded=' + el.getAttribute('aria-expanded') : 'no element'; }})()",
+                            center_x, center_y
+                        ),
+                        "returnByValue": true
                     }))
-                    .await
-                    .ok();
+                    .await;
+                if let Ok(result) = element_check {
+                    if let Some(value) = result.get("result").and_then(|r| r.get("value")) {
+                        crate::utils::log::log(&format!("[DEBUG] Element at point: {:?}", value));
+                    }
+                }
 
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
+                // Simple CDP mouse click sequence
                 self.client
                     .call("Input.dispatchMouseEvent", json!({
                         "type": "mousePressed",
@@ -329,7 +348,7 @@ impl PageSession for ChromiumSession {
                         "clickCount": 1
                     }))
                     .await
-                    .map_err(|e| BackendError::Protocol(format!("mousePressed failed: {}", e)))?;
+                    .ok();
 
                 self.client
                     .call("Input.dispatchMouseEvent", json!({
@@ -340,17 +359,15 @@ impl PageSession for ChromiumSession {
                         "clickCount": 1
                     }))
                     .await
-                    .map_err(|e| BackendError::Protocol(format!("mouseReleased failed: {}", e)))?;
+                    .ok();
 
-                // Wait for click to process
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
                 return Ok(());
             }
         }
 
-        // Fallback: focus and press Enter
-        crate::utils::log::log("[DEBUG] Box model failed, using keyboard fallback");
+        // Fallback: focus and press Space (most reliable for buttons)
+        crate::utils::log::log("[DEBUG] getContentQuads failed, using keyboard fallback");
         self.client
             .call("DOM.focus", json!({ "backendNodeId": backend_id }))
             .await
@@ -358,13 +375,13 @@ impl PageSession for ChromiumSession {
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        // Send Enter key
+        // Send Space key (works better for buttons/toggles)
         self.client
             .call("Input.dispatchKeyEvent", json!({
                 "type": "keyDown",
-                "key": "Enter",
-                "code": "Enter",
-                "windowsVirtualKeyCode": 13
+                "key": " ",
+                "code": "Space",
+                "windowsVirtualKeyCode": 32
             }))
             .await
             .ok();
@@ -372,9 +389,9 @@ impl PageSession for ChromiumSession {
         self.client
             .call("Input.dispatchKeyEvent", json!({
                 "type": "keyUp",
-                "key": "Enter",
-                "code": "Enter",
-                "windowsVirtualKeyCode": 13
+                "key": " ",
+                "code": "Space",
+                "windowsVirtualKeyCode": 32
             }))
             .await
             .ok();

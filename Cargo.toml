@@ -26,4 +26,3 @@ path = "src/main.rs"
 [lib]
 name = "abrowser"
 path = "src/lib.rs"
-crate-type = ["staticlib", "rlib"]

@@ -9,7 +9,6 @@
 
 pub mod accessibility;
 pub mod backend;
-pub mod browser;
 pub mod cdp;
 pub mod chromium;
 pub mod cli;

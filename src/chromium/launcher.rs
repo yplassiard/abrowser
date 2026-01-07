@@ -18,6 +18,7 @@ pub struct ChromiumLauncher {
     browser_ws_url: Option<String>,
     browser_client: Option<CdpClient>,
     viewport: (u32, u32),
+    profile_path: Option<PathBuf>,
 }
 
 impl ChromiumLauncher {
@@ -28,12 +29,18 @@ impl ChromiumLauncher {
             debug_port: port,
             browser_ws_url: None,
             browser_client: None,
-            viewport: (375, 812), // Default to mobile
+            viewport: (1920, 1080), // Full HD desktop
+            profile_path: None,
         }
     }
 
     pub fn with_viewport(mut self, width: u32, height: u32) -> Self {
         self.viewport = (width, height);
+        self
+    }
+
+    pub fn with_profile_path(mut self, path: PathBuf) -> Self {
+        self.profile_path = Some(path);
         self
     }
 
@@ -56,24 +63,30 @@ impl ChromiumLauncher {
         }
     }
 
-    /// Find the headless_shell binary
+    /// Find a system Chrome/Chromium binary
     fn find_binary() -> Option<PathBuf> {
+        #[cfg(target_os = "macos")]
         let candidates = [
-            // Built from source
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("chromium/src/out/Release/headless_shell"),
-            // System Chrome (macOS)
+            // Google Chrome (preferred)
             PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-            // System Chromium (macOS)
+            // Chromium
             PathBuf::from("/Applications/Chromium.app/Contents/MacOS/Chromium"),
-            // Linux - full browsers first (support audio)
+        ];
+
+        #[cfg(target_os = "linux")]
+        let candidates = [
+            // Full browsers (support audio)
             PathBuf::from("/usr/bin/google-chrome"),
+            PathBuf::from("/usr/bin/google-chrome-stable"),
             PathBuf::from("/usr/bin/chromium"),
             PathBuf::from("/usr/bin/chromium-browser"),
-            // Linux - headless-shell fallback (no audio)
+            // Headless shell (no audio, but works)
             PathBuf::from("/usr/lib/chromium/headless_shell"),
             PathBuf::from("/usr/bin/chromium-headless-shell"),
         ];
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let candidates: [PathBuf; 0] = [];
 
         for path in candidates {
             if path.exists() {
@@ -81,17 +94,35 @@ impl ChromiumLauncher {
             }
         }
 
-        // Check PATH
-        if let Ok(output) = Command::new("which").arg("chromium").output() {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return Some(PathBuf::from(path));
+        // Check PATH for chromium or google-chrome
+        for cmd in ["google-chrome", "chromium", "chromium-browser"] {
+            if let Ok(output) = Command::new("which").arg(cmd).output() {
+                if output.status.success() {
+                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !path.is_empty() {
+                        return Some(PathBuf::from(path));
+                    }
                 }
             }
         }
 
         None
+    }
+
+    /// Get installation instructions for the current platform
+    pub fn install_instructions() -> &'static str {
+        #[cfg(target_os = "macos")]
+        {
+            "Chrome/Chromium not found. Install with:\n  brew install --cask google-chrome\nor download from https://www.google.com/chrome/"
+        }
+        #[cfg(target_os = "linux")]
+        {
+            "Chrome/Chromium not found. Install with:\n  sudo apt install chromium\nor\n  sudo apt install chromium-browser"
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            "Chrome/Chromium not found. Please install Google Chrome or Chromium."
+        }
     }
 
     fn find_ws_url<R: std::io::Read>(
@@ -135,14 +166,16 @@ impl BrowserLauncher for ChromiumLauncher {
         Self::kill_existing_debug_processes();
 
         let binary = Self::find_binary().ok_or_else(|| {
-            BackendError::LaunchFailed("Could not find Chrome/Chromium binary".into())
+            BackendError::LaunchFailed(Self::install_instructions().into())
         })?;
 
-        // Create user data directory
-        let user_data_dir = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("abrowser")
-            .join("chrome-profile");
+        // Use custom profile path or default abrowser profile
+        let user_data_dir = self.profile_path.clone().unwrap_or_else(|| {
+            dirs::data_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("abrowser")
+                .join("chrome-profile")
+        });
         std::fs::create_dir_all(&user_data_dir).ok();
 
         let mut cmd = Command::new(&binary);
@@ -150,24 +183,24 @@ impl BrowserLauncher for ChromiumLauncher {
             "--headless=new",
             "--no-sandbox",
             "--disable-dev-shm-usage",
+            "--disable-gpu",
             // Accessibility
             "--enable-features=Accessibility",
             "--force-renderer-accessibility",
             // Media playback
             "--autoplay-policy=no-user-gesture-required",
-            "--enable-features=AudioServiceOutOfProcess",
-            "--disable-features=PreloadMediaEngagementData,MediaEngagementBypassAutoplayPolicies",
-            // Hide automation/headless detection
+            // Anti-detection flags
             "--disable-blink-features=AutomationControlled",
             "--disable-infobars",
-            "--excludeSwitches=enable-automation",
-            // Pretend to have GPU
-            "--use-gl=swiftshader",
-            "--enable-webgl",
+            "--disable-extensions",
+            "--disable-plugins-discovery",
+            "--disable-default-apps",
+            "--no-first-run",
+            "--no-default-browser-check",
             // Window size
             &format!("--window-size={},{}", self.viewport.0, self.viewport.1),
-            // User agent
-            "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            // User agent (recent Chrome version, no HeadlessChrome mention)
+            "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
             // Persist login sessions
             &format!("--user-data-dir={}", user_data_dir.display()),
             &format!("--remote-debugging-port={}", self.debug_port),
@@ -250,6 +283,27 @@ impl BrowserLauncher for ChromiumLauncher {
         let _ = page_client
             .call("Emulation.setUserAgentOverride", serde_json::json!({
                 "userAgent": user_agent
+            }))
+            .await;
+
+        // Inject script to hide automation detection
+        let _ = page_client
+            .call("Page.addScriptToEvaluateOnNewDocument", serde_json::json!({
+                "source": r#"
+                    // Hide webdriver
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => undefined
+                    });
+                    // Hide automation
+                    window.chrome = { runtime: {} };
+                    // Hide headless indicators
+                    Object.defineProperty(navigator, 'plugins', {
+                        get: () => [1, 2, 3, 4, 5]
+                    });
+                    Object.defineProperty(navigator, 'languages', {
+                        get: () => ['en-US', 'en']
+                    });
+                "#
             }))
             .await;
 

@@ -21,6 +21,10 @@ pub struct Config {
     #[serde(with = "backend_serde")]
     pub backend: BackendKind,
 
+    /// Custom profile path (None = use abrowser's own profile)
+    /// Set to "system" to use system Chrome profile, or a custom path
+    pub profile_path: Option<String>,
+
     /// Key bindings for navigation mode
     pub navigation_keys: KeyBindings,
 
@@ -57,9 +61,9 @@ mod backend_serde {
 #[serde(rename_all = "lowercase")]
 pub enum ViewportMode {
     /// Mobile viewport (375x812)
-    #[default]
     Mobile,
     /// Desktop viewport (1920x1080)
+    #[default]
     Desktop,
 }
 
@@ -92,6 +96,7 @@ impl Default for Config {
             search_engine: "https://duckduckgo.com/?q=%s".to_string(),
             viewport_mode: ViewportMode::default(),
             backend: BackendKind::Chromium,
+            profile_path: None,
             navigation_keys: KeyBindings::default_navigation(),
             focus_keys: KeyBindings::default_focus(),
             output: OutputConfig::default(),
@@ -100,6 +105,46 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Get the browser profile directory path
+    pub fn get_profile_path(&self) -> PathBuf {
+        match &self.profile_path {
+            Some(path) if path == "system" => {
+                // Use system Chrome profile
+                #[cfg(target_os = "macos")]
+                {
+                    dirs::home_dir()
+                        .unwrap_or_else(|| PathBuf::from("."))
+                        .join("Library/Application Support/Google/Chrome")
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    dirs::config_dir()
+                        .unwrap_or_else(|| PathBuf::from("."))
+                        .join("google-chrome")
+                }
+                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                {
+                    // Fallback to abrowser profile
+                    dirs::data_dir()
+                        .unwrap_or_else(|| PathBuf::from("."))
+                        .join("abrowser")
+                        .join("chrome-profile")
+                }
+            }
+            Some(custom_path) => {
+                // Use custom path
+                PathBuf::from(custom_path)
+            }
+            None => {
+                // Default abrowser profile
+                dirs::data_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join("abrowser")
+                    .join("chrome-profile")
+            }
+        }
+    }
+
     /// Load config from file, or return default if not found
     pub fn load() -> Self {
         if let Some(path) = Self::config_path() {

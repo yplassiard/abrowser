@@ -314,7 +314,21 @@ fn format_node(node: &crate::accessibility::AXNode) -> (String, String) {
                 (prefix, name.to_string())
             }
         }
-        "link" => ("[".to_string(), format!("{}]", name)),
+        "link" => {
+            if name.is_empty() {
+                // Try URL as fallback, otherwise skip
+                if let Some(ref url) = node.url {
+                    let short_url = url.trim_start_matches("https://")
+                        .trim_start_matches("http://")
+                        .trim_start_matches("www.");
+                    ("[".to_string(), format!("{}]", short_url))
+                } else {
+                    (String::new(), String::new()) // Skip unnamed links without URL
+                }
+            } else {
+                ("[".to_string(), format!("{}]", name))
+            }
+        }
         "button" => ("<".to_string(), format!("{}>", name)),
         "checkbox" => ("[ ] ".to_string(), name.to_string()),
         "radiobutton" => ("( ) ".to_string(), name.to_string()),

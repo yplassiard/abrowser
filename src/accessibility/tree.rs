@@ -35,6 +35,76 @@ impl AXTree {
 
         // Populate contains_role for nodes that contain interactive children
         self.populate_contained_roles();
+
+        // Derive names for links/buttons that have no name but contain images
+        self.derive_names_from_children();
+    }
+
+    /// For links/buttons without names, try to derive name from child images or text
+    fn derive_names_from_children(&mut self) {
+        // Find links/buttons with empty names
+        let unnamed: Vec<String> = self
+            .nodes
+            .values()
+            .filter(|n| {
+                n.name.is_empty()
+                    && matches!(n.role, Role::Link | Role::Button)
+                    && !n.child_ids.is_empty()
+            })
+            .map(|n| n.id.clone())
+            .collect();
+
+        // For each, try to find a name from children
+        for id in unnamed {
+            if let Some(derived_name) = self.find_child_name(&id) {
+                if let Some(node) = self.nodes.get_mut(&id) {
+                    node.name = derived_name;
+                }
+            }
+        }
+    }
+
+    /// Recursively find a name from child nodes (images, text, etc.)
+    fn find_child_name(&self, id: &str) -> Option<String> {
+        let node = self.nodes.get(id)?;
+
+        for child_id in &node.child_ids {
+            if let Some(child) = self.nodes.get(child_id) {
+                // Image with name (alt text)
+                if matches!(child.role, Role::Image) && !child.name.is_empty() {
+                    return Some(child.name.clone());
+                }
+                // Static text
+                if matches!(child.role, Role::StaticText) && !child.name.is_empty() {
+                    return Some(child.name.clone());
+                }
+                // Image with URL - extract filename
+                if matches!(child.role, Role::Image) && child.name.is_empty() {
+                    if let Some(ref url) = child.url {
+                        if let Some(filename) = url.rsplit('/').next() {
+                            let name = filename
+                                .split('?').next().unwrap_or(filename)
+                                .trim_end_matches(".png")
+                                .trim_end_matches(".jpg")
+                                .trim_end_matches(".jpeg")
+                                .trim_end_matches(".gif")
+                                .trim_end_matches(".svg")
+                                .trim_end_matches(".webp")
+                                .replace('-', " ")
+                                .replace('_', " ");
+                            if !name.is_empty() && name.len() > 2 {
+                                return Some(format!("[img: {}]", name));
+                            }
+                        }
+                    }
+                }
+                // Recurse into children
+                if let Some(name) = self.find_child_name(child_id) {
+                    return Some(name);
+                }
+            }
+        }
+        None
     }
 
     /// Find headings that contain interactive elements and set their contains_role

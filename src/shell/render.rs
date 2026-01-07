@@ -335,15 +335,15 @@ fn format_node(node: &crate::accessibility::AXNode) -> (String, String) {
         }
         "main" => {
             let label = if name.is_empty() { "Main" } else { name };
-            ("=== ".to_string(), format!("{} ===", label))
+            ("--- ".to_string(), format!("{} ---", label))
         }
         "banner" => {
             let label = if name.is_empty() { "Banner" } else { name };
-            ("^^^ ".to_string(), format!("{} ^^^", label))
+            ("--- ".to_string(), format!("{} ---", label))
         }
         "contentinfo" => {
             let label = if name.is_empty() { "Footer" } else { name };
-            ("___ ".to_string(), format!("{} ___", label))
+            ("--- ".to_string(), format!("{} ---", label))
         }
         "region" | "section" => {
             if !name.is_empty() {
@@ -354,11 +354,11 @@ fn format_node(node: &crate::accessibility::AXNode) -> (String, String) {
         }
         "complementary" => {
             let label = if name.is_empty() { "Aside" } else { name };
-            ("... ".to_string(), format!("{} ...", label))
+            ("--- ".to_string(), format!("{} ---", label))
         }
         "search" => {
             let label = if name.is_empty() { "Search" } else { name };
-            ("@@@ ".to_string(), format!("{} @@@", label))
+            ("--- ".to_string(), format!("{} ---", label))
         }
         "paragraph" | "statictext" => (String::new(), name.to_string()),
         _ => (String::new(), name.to_string()),

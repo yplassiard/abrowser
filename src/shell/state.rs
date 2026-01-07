@@ -173,9 +173,14 @@ impl Tab {
     }
 
     pub fn set_tree(&mut self, tree: AXTree) {
+        // Save current node info for cursor restoration
+        let prev_node_info = self.nodes.get(self.cursor_index).map(|n| {
+            (n.role.clone(), n.name.clone(), n.node_id.clone())
+        });
+
         // Build node references from linearized tree
-        self.nodes = tree
-            .linearize()
+        let linearized = tree.linearize();
+        self.nodes = linearized
             .iter()
             .map(|n| NodeRef {
                 node_id: n.id.clone(),
@@ -184,8 +189,39 @@ impl Tab {
                 has_handle: n.handle.is_some(),
             })
             .collect();
+
+        // Find focused node from CDP and restore cursor
+        let mut new_cursor = None;
+
+        // First priority: find the focused node from the accessibility tree
+        for (i, node) in linearized.iter().enumerate() {
+            if node.state.focused {
+                new_cursor = Some(i);
+                break;
+            }
+        }
+
+        // Second priority: try to find the same node by ID
+        if new_cursor.is_none() {
+            if let Some((_, _, ref prev_id)) = prev_node_info {
+                for (i, node_ref) in self.nodes.iter().enumerate() {
+                    if &node_ref.node_id == prev_id {
+                        new_cursor = Some(i);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Third priority: try to find by role and name
+        if new_cursor.is_none() {
+            if let Some((ref prev_role, ref prev_name, _)) = prev_node_info {
+                new_cursor = self.find_by_role_and_name(prev_role, prev_name);
+            }
+        }
+
         self.tree = Some(tree);
-        self.cursor_index = 0;
+        self.cursor_index = new_cursor.unwrap_or(0);
     }
 
     pub fn current_node(&self) -> Option<&AXNode> {

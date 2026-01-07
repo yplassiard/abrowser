@@ -12,6 +12,7 @@ pub use media::{MediaController, MediaStatus};
 pub use state::{BrowserState, FocusMode, Tab};
 use config::ViewportMode as VP;
 
+use crate::ai::ImageDescriber;
 use crate::backend::{create_launcher, BrowserLauncher, Key, NodeHandle};
 use crossterm::{
     cursor,
@@ -46,6 +47,8 @@ pub struct Shell {
     config: Config,
     /// Pending background tree refresh
     pending_refresh: tasks::PendingRefresh,
+    /// AI image describer
+    image_describer: ImageDescriber,
 }
 
 impl Shell {
@@ -57,11 +60,22 @@ impl Shell {
 
         let launcher = create_launcher(backend, Some((width, height)), profile_path)?;
 
+        // Create image describer with config settings
+        let image_describer = if config.ai.enabled {
+            ImageDescriber::new(
+                Some(config.ai.ollama_endpoint.clone()),
+                Some(config.ai.model.clone()),
+            )
+        } else {
+            ImageDescriber::new(None, None)
+        };
+
         Ok(Self {
             state: BrowserState::new().with_viewport(viewport_mode),
             launcher,
             config,
             pending_refresh: tasks::PendingRefresh::new(),
+            image_describer,
         })
     }
 
@@ -275,6 +289,72 @@ impl Shell {
             if let Some(ref session) = tab.session {
                 // Focus the element - this triggers onFocus/onBlur events in JS
                 let _ = session.focus_node(&handle).await;
+            }
+        }
+    }
+
+    /// Use AI to describe the current image
+    async fn describe_current_image(&mut self) {
+        // Check if AI is enabled
+        if !self.config.ai.enabled {
+            self.state.set_status("AI disabled. Enable in config: ai.enabled = true");
+            return;
+        }
+
+        // Get current node info
+        let (role, _name, url) = {
+            let tab = self.state.current_tab();
+            if let Some(node) = tab.current_node() {
+                (
+                    node.role_str().to_lowercase(),
+                    node.name.clone(),
+                    node.url.clone(),
+                )
+            } else {
+                self.state.set_status("No element selected");
+                return;
+            }
+        };
+
+        // Check if it's an image
+        if role != "image" {
+            self.state.set_status("Not an image (use 'i' to navigate to images)");
+            return;
+        }
+
+        // Get the image URL
+        let image_url = match url {
+            Some(u) if !u.is_empty() => u,
+            _ => {
+                // If no URL, try to get it from the element's src attribute via CDP
+                self.state.set_status("Image has no URL");
+                return;
+            }
+        };
+
+        // Show that we're fetching
+        self.state.set_status("Describing image with AI...");
+        render::render(&self.state, &self.config).ok();
+
+        // Check if we have a cached description
+        if let Some(cached) = self.image_describer.get_cached(&image_url).await {
+            self.state.set_status(&format!("AI: {}", cached));
+            return;
+        }
+
+        // Check if Ollama is available
+        if !self.image_describer.is_available().await {
+            self.state.set_status("Ollama not running. Start with: ollama serve");
+            return;
+        }
+
+        // Fetch and describe the image
+        match self.image_describer.describe_from_url(&image_url).await {
+            Some(description) => {
+                self.state.set_status(&format!("AI: {}", description));
+            }
+            None => {
+                self.state.set_status("Could not describe image (fetch or AI error)");
             }
         }
     }
@@ -510,6 +590,19 @@ impl Shell {
             (KeyModifiers::SHIFT, KeyCode::Char('D')) => {
                 self.state.prev_landmark();
                 self.focus_current_in_browser().await;
+            }
+            // Image navigation
+            (KeyModifiers::NONE, KeyCode::Char('i')) => {
+                self.state.next_element("image");
+                self.focus_current_in_browser().await;
+            }
+            (KeyModifiers::SHIFT, KeyCode::Char('I')) => {
+                self.state.prev_element("image");
+                self.focus_current_in_browser().await;
+            }
+            // AI image description
+            (KeyModifiers::CONTROL, KeyCode::Char('i')) => {
+                self.describe_current_image().await;
             }
 
             // Text search (vim-style)

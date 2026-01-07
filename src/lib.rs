@@ -8,6 +8,7 @@
 //! - Firefox (via Remote Debugging Protocol)
 
 pub mod accessibility;
+pub mod ai;
 pub mod backend;
 pub mod cdp;
 pub mod chromium;

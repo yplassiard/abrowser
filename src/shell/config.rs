@@ -33,6 +33,9 @@ pub struct Config {
 
     /// Output settings
     pub output: OutputConfig,
+
+    /// AI image description settings
+    pub ai: AiConfig,
 }
 
 /// Serde helper for BackendKind
@@ -100,6 +103,7 @@ impl Default for Config {
             navigation_keys: KeyBindings::default_navigation(),
             focus_keys: KeyBindings::default_focus(),
             output: OutputConfig::default(),
+            ai: AiConfig::default(),
         }
     }
 }
@@ -220,6 +224,9 @@ impl KeyBindings {
         bindings.insert("V".to_string(), "prev_visited".to_string());
         bindings.insert("d".to_string(), "next_landmark".to_string());
         bindings.insert("D".to_string(), "prev_landmark".to_string());
+        bindings.insert("i".to_string(), "next_image".to_string());
+        bindings.insert("I".to_string(), "prev_image".to_string());
+        bindings.insert("ctrl+i".to_string(), "describe_image".to_string());
 
         // Actions
         bindings.insert("enter".to_string(), "activate".to_string());
@@ -283,6 +290,30 @@ impl Default for OutputConfig {
             show_roles: true,
             braille_cells: 40,
             colors: true,
+        }
+    }
+}
+
+/// AI image description configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AiConfig {
+    /// Enable AI image descriptions (requires Ollama)
+    pub enabled: bool,
+
+    /// Ollama endpoint URL
+    pub ollama_endpoint: String,
+
+    /// Model to use for image description
+    pub model: String,
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ollama_endpoint: "http://localhost:11434".to_string(),
+            model: "llava".to_string(),
         }
     }
 }

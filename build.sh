@@ -6,8 +6,8 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# abrowser version
-ABROWSER_VERSION="0.1.0"
+# Extract version from Cargo.toml
+ABROWSER_VERSION=$(grep '^version' "$SCRIPT_DIR/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
 
 # Detect OS
 OS=$(uname -s)

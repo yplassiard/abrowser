@@ -503,6 +503,14 @@ impl Shell {
                 self.state.prev_visited_link();
                 self.focus_current_in_browser().await;
             }
+            (KeyModifiers::NONE, KeyCode::Char('d')) => {
+                self.state.next_landmark();
+                self.focus_current_in_browser().await;
+            }
+            (KeyModifiers::SHIFT, KeyCode::Char('D')) => {
+                self.state.prev_landmark();
+                self.focus_current_in_browser().await;
+            }
 
             // Text search (vim-style)
             (_, KeyCode::Char('/')) => {

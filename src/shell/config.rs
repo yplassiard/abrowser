@@ -218,6 +218,8 @@ impl KeyBindings {
         bindings.insert("T".to_string(), "prev_table".to_string());
         bindings.insert("v".to_string(), "next_visited".to_string());
         bindings.insert("V".to_string(), "prev_visited".to_string());
+        bindings.insert("d".to_string(), "next_landmark".to_string());
+        bindings.insert("D".to_string(), "prev_landmark".to_string());
 
         // Actions
         bindings.insert("enter".to_string(), "activate".to_string());

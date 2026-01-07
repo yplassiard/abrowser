@@ -390,6 +390,47 @@ impl Tab {
         self.find_prev("link")
     }
 
+    /// Check if a role is a landmark
+    fn is_landmark_role(role: &str) -> bool {
+        matches!(
+            role.to_lowercase().as_str(),
+            "main" | "navigation" | "banner" | "contentinfo" |
+            "complementary" | "search" | "region" | "form"
+        )
+    }
+
+    /// Find next landmark
+    pub fn find_next_landmark(&self) -> Option<usize> {
+        for i in (self.cursor_index + 1)..self.nodes.len() {
+            if Self::is_landmark_role(&self.nodes[i].role) {
+                return Some(i);
+            }
+        }
+        // Wrap around
+        for i in 0..self.cursor_index {
+            if Self::is_landmark_role(&self.nodes[i].role) {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Find previous landmark
+    pub fn find_prev_landmark(&self) -> Option<usize> {
+        for i in (0..self.cursor_index).rev() {
+            if Self::is_landmark_role(&self.nodes[i].role) {
+                return Some(i);
+            }
+        }
+        // Wrap around
+        for i in (self.cursor_index + 1..self.nodes.len()).rev() {
+            if Self::is_landmark_role(&self.nodes[i].role) {
+                return Some(i);
+            }
+        }
+        None
+    }
+
     /// Check if a role is focusable
     fn is_focusable_role(role: &str) -> bool {
         matches!(
@@ -648,6 +689,22 @@ impl BrowserState {
     pub fn prev_visited_link(&mut self) {
         let tab = self.current_tab_mut();
         if let Some(idx) = tab.find_prev_visited() {
+            tab.cursor_index = idx;
+            self.ensure_cursor_visible();
+        }
+    }
+
+    pub fn next_landmark(&mut self) {
+        let tab = self.current_tab_mut();
+        if let Some(idx) = tab.find_next_landmark() {
+            tab.cursor_index = idx;
+            self.ensure_cursor_visible();
+        }
+    }
+
+    pub fn prev_landmark(&mut self) {
+        let tab = self.current_tab_mut();
+        if let Some(idx) = tab.find_prev_landmark() {
             tab.cursor_index = idx;
             self.ensure_cursor_visible();
         }

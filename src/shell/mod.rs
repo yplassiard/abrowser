@@ -441,8 +441,8 @@ impl Shell {
             (KeyModifiers::CONTROL, KeyCode::Char('o')) => {
                 self.open_file_dialog().await?;
             }
-            // Options dialog (Ctrl+,)
-            (KeyModifiers::CONTROL, KeyCode::Char(',')) => {
+            // Options dialog (F2)
+            (_, KeyCode::F(2)) => {
                 self.open_options().await?;
             }
             (KeyModifiers::CONTROL, KeyCode::Char('s')) => {

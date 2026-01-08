@@ -1424,19 +1424,23 @@ impl Shell {
 
     /// Open the options dialog in a new tab
     async fn open_options(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        use crate::ui::options::open_options_data_url;
+        use crate::ui::options::generate_options_html;
 
         let models_dir = dirs::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("abrowser")
             .join("models");
 
-        // Generate data URL with options HTML
-        let options_url = open_options_data_url(&models_dir);
+        // Generate HTML and write to temp file
+        let html = generate_options_html(&models_dir);
+        let temp_path = std::env::temp_dir().join("abrowser_options.html");
+        std::fs::write(&temp_path, &html)?;
+
+        let file_url = format!("file://{}", temp_path.display());
 
         // Open in new tab
         self.new_tab().await?;
-        self.open_url(&options_url).await?;
+        self.open_url(&file_url).await?;
         self.state.set_status("Options opened");
 
         Ok(())

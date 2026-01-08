@@ -224,14 +224,12 @@ impl PageSession for ChromiumSession {
             }
         }
 
-        // Dump ALL names to find braille/vision
-        let all_names: String = cdp_nodes.iter()
-            .map(|n| n.name_str())
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join("|");
-        if all_names.to_lowercase().contains("braille") || all_names.to_lowercase().contains("vision") {
-            crate::utils::log::log("[DEBUG] Found braille/vision in tree!");
+        // Count images for debugging
+        let image_count = cdp_nodes.iter()
+            .filter(|n| n.role_str().to_lowercase() == "image" || n.role_str().to_lowercase() == "img")
+            .count();
+        if image_count > 0 {
+            crate::utils::log::log(&format!("[DEBUG] Found {} images in tree", image_count));
         }
 
         // Convert CDP nodes to unified nodes

@@ -213,7 +213,7 @@ impl AXNode {
             Role::ComboBox | Role::ListBox => true,
             Role::CheckBox | Role::RadioButton => true,
             Role::ListItem => true,
-            Role::Image => !self.name.is_empty(), // Only if has alt text
+            Role::Image => true, // Always show images (AI can describe those without alt)
             Role::Banner | Role::Navigation | Role::Main |
             Role::ContentInfo | Role::Complementary | Role::Search => true,
             // Generic nodes are interesting if they're focusable (menu items, etc.)

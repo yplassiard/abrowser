@@ -139,6 +139,7 @@ impl AXTree {
         // For each list item, check if it contains only a link
         for id in &list_items {
             if let Some((role, name)) = self.find_list_item_link(id) {
+                crate::utils::log::log(&format!("[DEBUG] List item {} contains {:?} with name: {}", id, role, name));
                 updates.push((id.clone(), role, Some(name)));
             }
         }

@@ -294,6 +294,7 @@ impl Tab {
                 "editabletext", "EditableText",
             ],
             "combobox" => vec!["combobox", "ComboBox", "listbox", "ListBox"],
+            "image" => vec!["image", "Image", "img", "Img", "graphic", "Graphic"],
             _ => vec![],
         }
     }

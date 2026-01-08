@@ -600,8 +600,8 @@ impl Shell {
                 self.state.prev_element("image");
                 self.focus_current_in_browser().await;
             }
-            // AI image description
-            (KeyModifiers::CONTROL, KeyCode::Char('i')) => {
+            // AI image description (Alt+I)
+            (KeyModifiers::ALT, KeyCode::Char('i')) => {
                 self.describe_current_image().await;
             }
 

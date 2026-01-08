@@ -408,6 +408,11 @@ impl Shell {
     }
 
     async fn handle_navigation_key(&mut self, key: KeyEvent) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        // Debug: log Alt key presses
+        if key.modifiers.contains(KeyModifiers::ALT) {
+            crate::utils::log::log(&format!("[DEBUG] Alt key: {:?} {:?}", key.modifiers, key.code));
+        }
+
         match (key.modifiers, key.code) {
             // Ctrl+ shortcuts
             (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
@@ -600,8 +605,8 @@ impl Shell {
                 self.state.prev_element("image");
                 self.focus_current_in_browser().await;
             }
-            // AI image description (Alt+I)
-            (KeyModifiers::ALT, KeyCode::Char('i')) => {
+            // AI image description (Alt+I or 'g' for "get description")
+            (KeyModifiers::ALT, KeyCode::Char('i')) | (KeyModifiers::NONE, KeyCode::Char('g')) => {
                 self.describe_current_image().await;
             }
 

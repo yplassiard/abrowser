@@ -226,6 +226,7 @@ impl KeyBindings {
         bindings.insert("D".to_string(), "prev_landmark".to_string());
         bindings.insert("i".to_string(), "next_image".to_string());
         bindings.insert("I".to_string(), "prev_image".to_string());
+        bindings.insert("g".to_string(), "describe_image".to_string());
         bindings.insert("alt+i".to_string(), "describe_image".to_string());
 
         // Actions

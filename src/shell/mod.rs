@@ -441,6 +441,10 @@ impl Shell {
             (KeyModifiers::CONTROL, KeyCode::Char('o')) => {
                 self.open_file_dialog().await?;
             }
+            // Options dialog (Ctrl+,)
+            (KeyModifiers::CONTROL, KeyCode::Char(',')) => {
+                self.open_options().await?;
+            }
             (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
                 self.save_page().await?;
             }
@@ -1415,6 +1419,26 @@ impl Shell {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Open the options dialog in a new tab
+    async fn open_options(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use crate::ui::options::open_options_data_url;
+
+        let models_dir = dirs::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("abrowser")
+            .join("models");
+
+        // Generate data URL with options HTML
+        let options_url = open_options_data_url(&models_dir);
+
+        // Open in new tab
+        self.new_tab().await?;
+        self.open_url(&options_url).await?;
+        self.state.set_status("Options opened");
+
         Ok(())
     }
 

@@ -17,5 +17,6 @@ pub mod firefox;
 pub mod input;
 pub mod output;
 pub mod shell;
+pub mod ui;
 
 mod utils;

@@ -1,205 +1,252 @@
-//! AI-powered image description using Ollama/LLaVA
+//! AI module for image description and text generation
 //!
-//! Provides optional image descriptions for accessibility when images lack alt text.
+//! Supports multiple backends:
+//! - Ollama (REST API, requires external server)
+//! - Local (llama.cpp, runs models directly)
 
-use base64::Engine;
-use serde::{Deserialize, Serialize};
+mod ollama;
+
+pub use ollama::OllamaBackend;
+
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Ollama API request for image description
-#[derive(Debug, Serialize)]
-struct OllamaRequest {
-    model: String,
-    prompt: String,
-    images: Vec<String>,
-    stream: bool,
+/// AI inference errors
+#[derive(Debug, Clone)]
+pub enum AiError {
+    /// Backend not available
+    NotAvailable,
+    /// Model not found
+    ModelNotFound(String),
+    /// Network error
+    Network(String),
+    /// Inference error
+    Inference(String),
+    /// Parse error
+    Parse(String),
+    /// Model loading error
+    ModelLoad(String),
 }
 
-/// Ollama API response
-#[derive(Debug, Deserialize)]
-struct OllamaResponse {
-    response: String,
+impl std::fmt::Display for AiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AiError::NotAvailable => write!(f, "AI backend not available"),
+            AiError::ModelNotFound(m) => write!(f, "Model not found: {}", m),
+            AiError::Network(e) => write!(f, "Network error: {}", e),
+            AiError::Inference(e) => write!(f, "Inference error: {}", e),
+            AiError::Parse(e) => write!(f, "Parse error: {}", e),
+            AiError::ModelLoad(e) => write!(f, "Model load error: {}", e),
+        }
+    }
 }
 
-/// AI image describer using Ollama with LLaVA
-pub struct ImageDescriber {
-    /// Ollama endpoint URL
-    endpoint: String,
-    /// Model to use (default: llava)
-    model: String,
-    /// HTTP client
-    client: reqwest::Client,
-    /// Cache of descriptions by image URL
+impl std::error::Error for AiError {}
+
+pub type AiResult<T> = Result<T, AiError>;
+
+/// Trait for AI backends
+#[async_trait::async_trait]
+pub trait AiBackend: Send + Sync {
+    /// Backend name
+    fn name(&self) -> &str;
+
+    /// Check if backend is available
+    async fn is_available(&self) -> bool;
+
+    /// Describe an image
+    async fn describe_image(&self, image_bytes: &[u8], model: &str) -> AiResult<String>;
+
+    /// Generate text from prompt
+    async fn generate_text(&self, prompt: &str, model: &str) -> AiResult<String>;
+
+    /// Get cached result
+    async fn get_cached(&self, key: &str) -> Option<String>;
+
+    /// Set cached result
+    async fn set_cached(&self, key: &str, value: &str);
+}
+
+/// Model information
+#[derive(Debug, Clone)]
+pub struct ModelInfo {
+    pub id: String,
+    pub name: String,
+    pub size_bytes: u64,
+    pub downloaded: bool,
+    pub capabilities: Vec<ModelCapability>,
+}
+
+/// Model capabilities
+#[derive(Debug, Clone, PartialEq)]
+pub enum ModelCapability {
+    /// Can describe images
+    Vision,
+    /// Can generate/summarize text
+    Text,
+    /// Can extract structured data
+    Extraction,
+}
+
+/// Available models for download
+pub fn available_models() -> Vec<ModelInfo> {
+    vec![
+        ModelInfo {
+            id: "llava-v1.5-7b-q4".to_string(),
+            name: "LLaVA 1.5 7B (Q4)".to_string(),
+            size_bytes: 4_294_967_296, // ~4GB
+            downloaded: false,
+            capabilities: vec![ModelCapability::Vision, ModelCapability::Text],
+        },
+        ModelInfo {
+            id: "gemma-3-4b-q4".to_string(),
+            name: "Gemma 3 4B (Q4)".to_string(),
+            size_bytes: 2_684_354_560, // ~2.5GB
+            downloaded: false,
+            capabilities: vec![ModelCapability::Text, ModelCapability::Extraction],
+        },
+    ]
+}
+
+/// AI service that manages backends and caching
+pub struct AiService {
+    /// Active backend
+    backend: Arc<dyn AiBackend>,
+    /// Description cache (image_url -> description)
     cache: Arc<RwLock<HashMap<String, String>>>,
-    /// Whether the service is available
-    available: Arc<RwLock<Option<bool>>>,
+    /// Models directory
+    models_dir: PathBuf,
 }
 
-impl ImageDescriber {
-    /// Create a new image describer
-    pub fn new(endpoint: Option<String>, model: Option<String>) -> Self {
+impl AiService {
+    /// Create with Ollama backend
+    pub fn with_ollama(endpoint: Option<String>) -> Self {
+        let models_dir = dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("abrowser")
+            .join("models");
+
         Self {
-            endpoint: endpoint.unwrap_or_else(|| "http://localhost:11434".to_string()),
-            model: model.unwrap_or_else(|| "llava".to_string()),
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .unwrap_or_default(),
+            backend: Arc::new(OllamaBackend::new(endpoint)),
             cache: Arc::new(RwLock::new(HashMap::new())),
-            available: Arc::new(RwLock::new(None)),
+            models_dir,
         }
     }
 
-    /// Check if Ollama is available (cached check)
+    /// Check if AI is available
     pub async fn is_available(&self) -> bool {
-        // Check cached availability
-        {
-            let available = self.available.read().await;
-            if let Some(avail) = *available {
-                return avail;
-            }
-        }
-
-        // Perform availability check
-        let avail = self.check_availability().await;
-        *self.available.write().await = Some(avail);
-        avail
+        self.backend.is_available().await
     }
 
-    /// Actually check if Ollama is running
-    async fn check_availability(&self) -> bool {
-        let url = format!("{}/api/tags", self.endpoint);
-        match self.client.get(&url).send().await {
-            Ok(resp) => resp.status().is_success(),
-            Err(_) => false,
-        }
+    /// Get backend name
+    pub fn backend_name(&self) -> &str {
+        self.backend.name()
     }
 
-    /// Get cached description for an image URL
-    pub async fn get_cached(&self, url: &str) -> Option<String> {
-        self.cache.read().await.get(url).cloned()
+    /// Describe an image from bytes
+    pub async fn describe_image(&self, image_bytes: &[u8], cache_key: &str) -> AiResult<String> {
+        // Check cache
+        if let Some(cached) = self.cache.read().await.get(cache_key) {
+            return Ok(cached.clone());
+        }
+
+        // Call backend
+        let result = self.backend.describe_image(image_bytes, "llava").await?;
+
+        // Cache result
+        self.cache.write().await.insert(cache_key.to_string(), result.clone());
+
+        Ok(result)
     }
 
     /// Describe an image from URL
-    pub async fn describe_from_url(&self, image_url: &str) -> Option<String> {
-        // Check cache first
-        if let Some(cached) = self.get_cached(image_url).await {
-            return Some(cached);
+    pub async fn describe_image_url(&self, url: &str) -> AiResult<String> {
+        // Check cache
+        if let Some(cached) = self.cache.read().await.get(url) {
+            return Ok(cached.clone());
         }
 
-        // Check if service is available
-        if !self.is_available().await {
-            return None;
-        }
-
-        // Fetch the image
-        let image_bytes = match self.client.get(image_url).send().await {
-            Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-                Ok(bytes) => bytes,
-                Err(_) => return None,
-            },
-            _ => return None,
-        };
-
-        self.describe_bytes(&image_bytes, image_url).await
-    }
-
-    /// Describe an image from raw bytes
-    pub async fn describe_bytes(&self, image_bytes: &[u8], cache_key: &str) -> Option<String> {
-        // Check cache first
-        if let Some(cached) = self.get_cached(cache_key).await {
-            return Some(cached);
-        }
-
-        // Check if service is available
-        if !self.is_available().await {
-            return None;
-        }
-
-        // Base64 encode the image
-        let base64_image = base64::engine::general_purpose::STANDARD.encode(image_bytes);
-
-        // Build request
-        let request = OllamaRequest {
-            model: self.model.clone(),
-            prompt: "Describe this image very briefly in one short sentence for a blind user. Focus on the main subject and action. Do not start with 'This image shows' or 'The image depicts'.".to_string(),
-            images: vec![base64_image],
-            stream: false,
-        };
-
-        // Send request
-        let url = format!("{}/api/generate", self.endpoint);
-        let response = match self.client.post(&url).json(&request).send().await {
-            Ok(resp) => resp,
-            Err(_) => return None,
-        };
+        // Fetch image
+        let client = reqwest::Client::new();
+        let response = client.get(url).send().await
+            .map_err(|e| AiError::Network(e.to_string()))?;
 
         if !response.status().is_success() {
-            return None;
+            return Err(AiError::Network(format!("HTTP {}", response.status())));
         }
 
-        // Parse response
-        let ollama_response: OllamaResponse = match response.json().await {
-            Ok(r) => r,
-            Err(_) => return None,
-        };
+        let bytes = response.bytes().await
+            .map_err(|e| AiError::Network(e.to_string()))?;
 
-        let description = ollama_response.response.trim().to_string();
-
-        // Cache the result
-        if !description.is_empty() {
-            self.cache
-                .write()
-                .await
-                .insert(cache_key.to_string(), description.clone());
-        }
-
-        Some(description)
+        self.describe_image(&bytes, url).await
     }
 
-    /// Clear the description cache
+    /// Generate text (for summaries, etc.)
+    pub async fn generate_text(&self, prompt: &str, model: &str) -> AiResult<String> {
+        self.backend.generate_text(prompt, model).await
+    }
+
+    /// Summarize page content
+    pub async fn summarize_page(&self, content: &str) -> AiResult<String> {
+        let prompt = format!(
+            "Summarize this web page content in 2-3 sentences for a blind user:\n\n{}",
+            content.chars().take(4000).collect::<String>()
+        );
+        self.backend.generate_text(&prompt, "gemma3").await
+    }
+
+    /// Get models directory
+    pub fn models_dir(&self) -> &PathBuf {
+        &self.models_dir
+    }
+
+    /// Clear cache
     pub async fn clear_cache(&self) {
         self.cache.write().await.clear();
     }
+}
 
-    /// Reset availability check (e.g., after config change)
+// Keep the old ImageDescriber for backward compatibility
+pub struct ImageDescriber {
+    service: AiService,
+}
+
+impl ImageDescriber {
+    pub fn new(endpoint: Option<String>, _model: Option<String>) -> Self {
+        Self {
+            service: AiService::with_ollama(endpoint),
+        }
+    }
+
+    pub async fn is_available(&self) -> bool {
+        self.service.is_available().await
+    }
+
+    pub async fn get_cached(&self, url: &str) -> Option<String> {
+        self.service.cache.read().await.get(url).cloned()
+    }
+
+    pub async fn describe_from_url(&self, image_url: &str) -> Option<String> {
+        self.service.describe_image_url(image_url).await.ok()
+    }
+
+    pub async fn describe_bytes(&self, image_bytes: &[u8], cache_key: &str) -> Option<String> {
+        self.service.describe_image(image_bytes, cache_key).await.ok()
+    }
+
+    pub async fn clear_cache(&self) {
+        self.service.clear_cache().await;
+    }
+
     pub async fn reset_availability(&self) {
-        *self.available.write().await = None;
+        // No-op for now, availability is checked each time
     }
 }
 
 impl Default for ImageDescriber {
     fn default() -> Self {
         Self::new(None, None)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_describer_creation() {
-        let describer = ImageDescriber::new(None, None);
-        assert_eq!(describer.endpoint, "http://localhost:11434");
-        assert_eq!(describer.model, "llava");
-    }
-
-    #[tokio::test]
-    async fn test_cache() {
-        let describer = ImageDescriber::new(None, None);
-
-        // Manually insert into cache
-        describer
-            .cache
-            .write()
-            .await
-            .insert("test_url".to_string(), "test description".to_string());
-
-        // Should retrieve from cache
-        let cached = describer.get_cached("test_url").await;
-        assert_eq!(cached, Some("test description".to_string()));
     }
 }

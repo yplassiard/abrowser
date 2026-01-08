@@ -334,11 +334,25 @@ fn format_node(node: &crate::accessibility::AXNode) -> (String, String) {
         "radiobutton" => ("( ) ".to_string(), name.to_string()),
         "textbox" | "textarea" | "textfield" => ("[____] ".to_string(), name.to_string()),
         "listitem" => {
+            // Calculate indent based on nesting level
+            let indent = "  ".repeat(node.level as usize);
+
             // Use numbered format if we have position info, otherwise use dash
-            if let Some(pos) = node.pos_in_set {
-                (format!("{}. ", pos), name.to_string())
+            let marker = if let Some(pos) = node.pos_in_set {
+                format!("{}. ", pos)
             } else {
-                ("- ".to_string(), name.to_string())
+                "- ".to_string()
+            };
+
+            // If list item contains only a link, show combined format
+            if let Some(ref contained) = node.contains_role {
+                match contained {
+                    Role::Link => (format!("{}{}[", indent, marker), format!("{}]", name)),
+                    Role::Button => (format!("{}{}<", indent, marker), format!("{}>", name)),
+                    _ => (format!("{}{}", indent, marker), name.to_string()),
+                }
+            } else {
+                (format!("{}{}", indent, marker), name.to_string())
             }
         }
         "image" => ("[IMG: ".to_string(), format!("{}]", name)),

@@ -107,7 +107,7 @@ impl AXTree {
         None
     }
 
-    /// Find headings that contain interactive elements and set their contains_role
+    /// Find headings/list items that contain interactive elements and set their contains_role
     fn populate_contained_roles(&mut self) {
         // Collect IDs and names of headings
         let headings: Vec<(String, String)> = self
@@ -117,22 +117,143 @@ impl AXTree {
             .map(|n| (n.id.clone(), n.name.clone()))
             .collect();
 
-        // For each heading, check and collect results
-        let mut updates: Vec<(String, Role)> = Vec::new();
+        // Collect IDs of list items
+        let list_items: Vec<String> = self
+            .nodes
+            .values()
+            .filter(|n| matches!(n.role, Role::ListItem))
+            .map(|n| n.id.clone())
+            .collect();
+
+        let mut updates: Vec<(String, Role, Option<String>)> = Vec::new();
+
+        // For each heading, check for contained interactive elements
         for (id, name) in &headings {
             if let Some(node) = self.nodes.get(id) {
                 if let Some(role) = self.find_contained_role_recursive(node, name) {
-                    updates.push((id.clone(), role));
+                    updates.push((id.clone(), role, None));
                 }
             }
         }
 
-        // Apply updates
-        for (id, role) in updates {
-            if let Some(node) = self.nodes.get_mut(&id) {
-                node.contains_role = Some(role);
+        // For each list item, check if it contains only a link
+        for id in &list_items {
+            if let Some((role, name)) = self.find_list_item_link(id) {
+                updates.push((id.clone(), role, Some(name)));
             }
         }
+
+        // Apply updates
+        for (id, role, name_opt) in updates {
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.contains_role = Some(role);
+                if let Some(name) = name_opt {
+                    // Copy the link name to the list item
+                    node.name = name;
+                }
+            }
+        }
+
+        // Calculate list nesting levels
+        self.calculate_list_levels();
+    }
+
+    /// Check if a list item contains only a link (no other significant content)
+    fn find_list_item_link(&self, id: &str) -> Option<(Role, String)> {
+        let node = self.nodes.get(id)?;
+
+        // Find all interesting children
+        let mut link_child: Option<&AXNode> = None;
+        let mut has_other_content = false;
+
+        for child_id in &node.child_ids {
+            if let Some(child) = self.nodes.get(child_id) {
+                if matches!(child.role, Role::Link) {
+                    link_child = Some(child);
+                } else if child.is_interesting() && !matches!(child.role, Role::Generic | Role::Group) {
+                    // Has other interesting content besides links
+                    has_other_content = true;
+                } else {
+                    // Recurse into non-interesting containers to find links
+                    if let Some((role, name)) = self.find_nested_link(child) {
+                        if link_child.is_none() {
+                            link_child = self.nodes.get(&child.id);
+                            // Actually we need the link node, not the container
+                            return Some((role, name));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(link) = link_child {
+            if !has_other_content {
+                return Some((Role::Link, link.name.clone()));
+            }
+        }
+
+        None
+    }
+
+    /// Recursively find a link in a container node
+    fn find_nested_link(&self, node: &AXNode) -> Option<(Role, String)> {
+        for child_id in &node.child_ids {
+            if let Some(child) = self.nodes.get(child_id) {
+                if matches!(child.role, Role::Link) {
+                    return Some((Role::Link, child.name.clone()));
+                }
+                if let Some(result) = self.find_nested_link(child) {
+                    return Some(result);
+                }
+            }
+        }
+        None
+    }
+
+    /// Calculate nesting level for list items
+    fn calculate_list_levels(&mut self) {
+        let list_item_ids: Vec<String> = self
+            .nodes
+            .values()
+            .filter(|n| matches!(n.role, Role::ListItem))
+            .map(|n| n.id.clone())
+            .collect();
+
+        let mut level_updates: Vec<(String, u8)> = Vec::new();
+
+        for id in list_item_ids {
+            let level = self.count_list_ancestors(&id);
+            if level > 0 {
+                level_updates.push((id, level as u8));
+            }
+        }
+
+        for (id, level) in level_updates {
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.level = level;
+            }
+        }
+    }
+
+    /// Count how many list ancestors a node has
+    fn count_list_ancestors(&self, id: &str) -> usize {
+        let mut count = 0;
+        let mut current_id = id.to_string();
+
+        while let Some(node) = self.nodes.get(&current_id) {
+            if let Some(ref parent_id) = node.parent_id {
+                if let Some(parent) = self.nodes.get(parent_id) {
+                    if matches!(parent.role, Role::List | Role::ListItem) {
+                        count += 1;
+                    }
+                }
+                current_id = parent_id.clone();
+            } else {
+                break;
+            }
+        }
+
+        count / 2 // Divide by 2 because we count both List and ListItem
     }
 
     /// Get the root node

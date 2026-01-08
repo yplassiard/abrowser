@@ -295,26 +295,26 @@ impl Shell {
 
     /// Use AI to describe the current image
     async fn describe_current_image(&mut self) {
-        // Check if AI is enabled
-        if !self.config.ai.enabled {
-            self.state.set_status("AI disabled. Enable in config: ai.enabled = true");
-            return;
-        }
+        crate::utils::log::log("[DEBUG] describe_current_image called");
 
-        // Get current node info
-        let (role, _name, url) = {
+        // Get current node info and index
+        let (role, current_name, url, node_idx) = {
             let tab = self.state.current_tab();
+            let idx = tab.cursor_index;
             if let Some(node) = tab.current_node() {
                 (
                     node.role_str().to_lowercase(),
                     node.name.clone(),
                     node.url.clone(),
+                    idx,
                 )
             } else {
                 self.state.set_status("No element selected");
                 return;
             }
         };
+
+        crate::utils::log::log(&format!("[DEBUG] Current node: role={} name={}", role, current_name));
 
         // Check if it's an image
         if role != "image" {
@@ -326,11 +326,12 @@ impl Shell {
         let image_url = match url {
             Some(u) if !u.is_empty() => u,
             _ => {
-                // If no URL, try to get it from the element's src attribute via CDP
                 self.state.set_status("Image has no URL");
                 return;
             }
         };
+
+        crate::utils::log::log(&format!("[DEBUG] Image URL: {}", image_url));
 
         // Show that we're fetching
         self.state.set_status("Describing image with AI...");
@@ -338,24 +339,37 @@ impl Shell {
 
         // Check if we have a cached description
         if let Some(cached) = self.image_describer.get_cached(&image_url).await {
+            // Update the node name in our display
+            self.update_image_description(node_idx, &cached);
             self.state.set_status(&format!("AI: {}", cached));
             return;
         }
 
-        // Check if Ollama is available
+        // Check if Ollama is available (auto-detect, don't require config)
         if !self.image_describer.is_available().await {
-            self.state.set_status("Ollama not running. Start with: ollama serve");
+            self.state.set_status("Ollama not running. Start: ollama serve && ollama pull llava");
             return;
         }
 
         // Fetch and describe the image
         match self.image_describer.describe_from_url(&image_url).await {
             Some(description) => {
+                crate::utils::log::log(&format!("[DEBUG] AI description: {}", description));
+                // Update the node name in our display
+                self.update_image_description(node_idx, &description);
                 self.state.set_status(&format!("AI: {}", description));
             }
             None => {
                 self.state.set_status("Could not describe image (fetch or AI error)");
             }
+        }
+    }
+
+    /// Update the displayed name for an image after AI description
+    fn update_image_description(&mut self, node_idx: usize, description: &str) {
+        let tab = self.state.current_tab_mut();
+        if let Some(node_ref) = tab.nodes.get_mut(node_idx) {
+            node_ref.name = description.to_string();
         }
     }
 

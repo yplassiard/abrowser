@@ -33,7 +33,7 @@ pub struct Tab {
     /// Legacy CDP client (TODO: remove in Phase 6)
     pub page_client: Option<CdpClient>,
     tree: Option<AXTree>,
-    nodes: Vec<NodeRef>,
+    pub nodes: Vec<NodeRef>,
     pub cursor_index: usize,
     pub scroll_offset: usize,
     pub visited_links: Vec<String>,
@@ -58,11 +58,11 @@ pub struct Tab {
 /// Reference to a node in the tree
 #[derive(Clone)]
 #[allow(dead_code)]
-struct NodeRef {
-    node_id: String,
-    role: String,
-    name: String,
-    has_handle: bool,
+pub struct NodeRef {
+    pub node_id: String,
+    pub role: String,
+    pub name: String,
+    pub has_handle: bool,
 }
 
 impl Tab {

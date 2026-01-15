@@ -1,11 +1,15 @@
 //! AI module for image description and text generation
 //!
 //! Supports multiple backends:
-//! - Ollama (REST API, requires external server)
-//! - Local (llama.cpp, runs models directly)
+//! - Local (llama.cpp via llama-cpp-2, runs models directly)
+//! - Ollama (REST API, requires external server) - fallback
 
+pub mod download;
+mod local;
 mod ollama;
 
+pub use download::{available_downloads, download_model, ModelDownload, ModelDownloader, DownloadStatus};
+pub use local::LocalBackend;
 pub use ollama::OllamaBackend;
 
 use std::collections::HashMap;
@@ -118,10 +122,58 @@ pub struct AiService {
     cache: Arc<RwLock<HashMap<String, String>>>,
     /// Models directory
     models_dir: PathBuf,
+    /// Vision model to use
+    vision_model: String,
+    /// Text model to use
+    text_model: String,
 }
 
 impl AiService {
-    /// Create with Ollama backend
+    /// Create with local llama.cpp backend (preferred)
+    pub fn with_local(models_dir: Option<PathBuf>) -> AiResult<Self> {
+        let models_dir = models_dir.unwrap_or_else(|| {
+            dirs::data_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("abrowser")
+                .join("models")
+        });
+
+        // Create models directory if it doesn't exist
+        let _ = std::fs::create_dir_all(&models_dir);
+
+        let backend = LocalBackend::new(models_dir.clone())?;
+
+        Ok(Self {
+            backend: Arc::new(backend),
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            models_dir,
+            vision_model: "llava".to_string(),
+            text_model: "gemma".to_string(),
+        })
+    }
+
+    /// Create with local backend and GPU acceleration
+    pub fn with_local_gpu(models_dir: Option<PathBuf>, n_gpu_layers: u32) -> AiResult<Self> {
+        let models_dir = models_dir.unwrap_or_else(|| {
+            dirs::data_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("abrowser")
+                .join("models")
+        });
+
+        let _ = std::fs::create_dir_all(&models_dir);
+        let backend = LocalBackend::with_gpu(models_dir.clone(), n_gpu_layers)?;
+
+        Ok(Self {
+            backend: Arc::new(backend),
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            models_dir,
+            vision_model: "llava".to_string(),
+            text_model: "gemma".to_string(),
+        })
+    }
+
+    /// Create with Ollama backend (fallback)
     pub fn with_ollama(endpoint: Option<String>) -> Self {
         let models_dir = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -132,7 +184,35 @@ impl AiService {
             backend: Arc::new(OllamaBackend::new(endpoint)),
             cache: Arc::new(RwLock::new(HashMap::new())),
             models_dir,
+            vision_model: "llava".to_string(),
+            text_model: "gemma3:4b".to_string(),
         }
+    }
+
+    /// Create the best available backend (local first, then Ollama)
+    pub fn auto() -> Self {
+        let models_dir = dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("abrowser")
+            .join("models");
+
+        // Try local backend first
+        if let Ok(service) = Self::with_local(Some(models_dir.clone())) {
+            return service;
+        }
+
+        // Fall back to Ollama
+        Self::with_ollama(None)
+    }
+
+    /// Set the vision model to use
+    pub fn set_vision_model(&mut self, model: String) {
+        self.vision_model = model;
+    }
+
+    /// Set the text model to use
+    pub fn set_text_model(&mut self, model: String) {
+        self.text_model = model;
     }
 
     /// Check if AI is available
@@ -152,8 +232,8 @@ impl AiService {
             return Ok(cached.clone());
         }
 
-        // Call backend
-        let result = self.backend.describe_image(image_bytes, "llava").await?;
+        // Call backend with configured vision model
+        let result = self.backend.describe_image(image_bytes, &self.vision_model).await?;
 
         // Cache result
         self.cache.write().await.insert(cache_key.to_string(), result.clone());
@@ -184,7 +264,8 @@ impl AiService {
     }
 
     /// Generate text (for summaries, etc.)
-    pub async fn generate_text(&self, prompt: &str, model: &str) -> AiResult<String> {
+    pub async fn generate_text(&self, prompt: &str, model: Option<&str>) -> AiResult<String> {
+        let model = model.unwrap_or(&self.text_model);
         self.backend.generate_text(prompt, model).await
     }
 
@@ -194,7 +275,7 @@ impl AiService {
             "Summarize this web page content in 2-3 sentences for a blind user:\n\n{}",
             content.chars().take(4000).collect::<String>()
         );
-        self.backend.generate_text(&prompt, "gemma3").await
+        self.backend.generate_text(&prompt, &self.text_model).await
     }
 
     /// Get models directory
@@ -214,10 +295,21 @@ pub struct ImageDescriber {
 }
 
 impl ImageDescriber {
-    pub fn new(endpoint: Option<String>, _model: Option<String>) -> Self {
+    /// Create with auto-detection (local first, then Ollama)
+    pub fn new(_endpoint: Option<String>, _model: Option<String>) -> Self {
         Self {
-            service: AiService::with_ollama(endpoint),
+            service: AiService::auto(),
         }
+    }
+
+    /// Create with local llama.cpp backend
+    pub fn with_local(models_dir: Option<PathBuf>) -> Option<Self> {
+        AiService::with_local(models_dir).ok().map(|service| Self { service })
+    }
+
+    /// Get the backend name
+    pub fn backend_name(&self) -> &str {
+        self.service.backend_name()
     }
 
     pub async fn is_available(&self) -> bool {

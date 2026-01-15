@@ -311,8 +311,8 @@ impl PageSession for ChromiumSession {
                 // Quad is 8 values: [x1,y1,x2,y2,x3,y3,x4,y4]
                 let x1 = first_quad.get(0).and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let y1 = first_quad.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let x3 = first_quad.get(4).and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let y3 = first_quad.get(5).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let _x3 = first_quad.get(4).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let _y3 = first_quad.get(5).and_then(|v| v.as_f64()).unwrap_or(0.0);
 
                 // Click near top-left corner (offset by 5px) to avoid hitting child elements like icons
                 let center_x = x1 + 5.0;
@@ -883,6 +883,36 @@ impl PageSession for ChromiumSession {
             .and_then(|r| r.get("value"))
             .cloned()
             .unwrap_or(Value::Null))
+    }
+
+    async fn set_document_content(&self, html: &str) -> BackendResult<()> {
+        // Get the frame ID first
+        let frame_tree = self
+            .client
+            .call("Page.getFrameTree", json!({}))
+            .await
+            .map_err(|e| BackendError::Protocol(e.to_string()))?;
+
+        let frame_id = frame_tree
+            .get("frameTree")
+            .and_then(|ft| ft.get("frame"))
+            .and_then(|f| f.get("id"))
+            .and_then(|id| id.as_str())
+            .ok_or_else(|| BackendError::Protocol("Failed to get frame ID".to_string()))?;
+
+        // Set document content
+        self.client
+            .call(
+                "Page.setDocumentContent",
+                json!({
+                    "frameId": frame_id,
+                    "html": html
+                }),
+            )
+            .await
+            .map_err(|e| BackendError::Protocol(e.to_string()))?;
+
+        Ok(())
     }
 
     // ========== Lifecycle ==========

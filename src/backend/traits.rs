@@ -171,6 +171,10 @@ pub trait PageSession: Send + Sync {
     /// This is a low-level escape hatch for operations not covered by other methods.
     async fn evaluate_js(&self, script: &str) -> BackendResult<serde_json::Value>;
 
+    /// Set the document content directly (for internal pages like options).
+    /// This sets HTML content without navigating to a URL.
+    async fn set_document_content(&self, html: &str) -> BackendResult<()>;
+
     // ========== Lifecycle ==========
 
     /// Close this page session.

@@ -632,6 +632,14 @@ impl PageSession for FirefoxSession {
         self.eval_js_sync(script)
     }
 
+    async fn set_document_content(&self, html: &str) -> BackendResult<()> {
+        // Escape backticks and backslashes for template literal
+        let escaped = html.replace('\\', "\\\\").replace('`', "\\`");
+        let script = format!("document.open(); document.write(`{}`); document.close();", escaped);
+        self.eval_js_sync(&script)?;
+        Ok(())
+    }
+
     // ========== Lifecycle ==========
 
     async fn close(&self) -> BackendResult<()> {

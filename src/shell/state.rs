@@ -35,6 +35,8 @@ pub struct Tab {
     tree: Option<AXTree>,
     pub nodes: Vec<NodeRef>,
     pub cursor_index: usize,
+    /// Horizontal cursor position (character offset within the rendered line)
+    pub cursor_x: usize,
     pub scroll_offset: usize,
     pub visited_links: Vec<String>,
     /// Loading progress (0-100), None if not loading
@@ -75,6 +77,7 @@ impl Tab {
             tree: None,
             nodes: Vec::new(),
             cursor_index: 0,
+            cursor_x: 0,
             scroll_offset: 0,
             visited_links: Vec::new(),
             loading_progress: None,
@@ -222,11 +225,17 @@ impl Tab {
 
         self.tree = Some(tree);
         self.cursor_index = new_cursor.unwrap_or(0);
+        self.cursor_x = 0; // Reset horizontal cursor on page load
     }
 
     pub fn current_node(&self) -> Option<&AXNode> {
         let node_ref = self.nodes.get(self.cursor_index)?;
         self.tree.as_ref()?.get(&node_ref.node_id)
+    }
+
+    pub fn current_node_mut(&mut self) -> Option<&mut AXNode> {
+        let node_id = self.nodes.get(self.cursor_index)?.node_id.clone();
+        self.tree.as_mut()?.get_mut(&node_id)
     }
 
     pub fn node_count(&self) -> usize {
@@ -599,6 +608,7 @@ impl BrowserState {
         let tab = self.current_tab_mut();
         if tab.cursor_index > 0 {
             tab.cursor_index -= 1;
+            tab.cursor_x = 0; // Reset horizontal cursor on vertical move
             self.ensure_cursor_visible();
         }
     }
@@ -607,13 +617,65 @@ impl BrowserState {
         let tab = self.current_tab_mut();
         if tab.cursor_index + 1 < tab.node_count() {
             tab.cursor_index += 1;
+            tab.cursor_x = 0; // Reset horizontal cursor on vertical move
             self.ensure_cursor_visible();
+        }
+    }
+
+    /// Move cursor left one character, go to previous line at boundary
+    /// Returns true if moved to previous line
+    pub fn cursor_left(&mut self) -> bool {
+        let tab = self.current_tab_mut();
+        if tab.cursor_x > 0 {
+            tab.cursor_x -= 1;
+            false
+        } else if tab.cursor_index > 0 {
+            // Go to previous line, cursor will be set to end by caller
+            tab.cursor_index -= 1;
+            tab.cursor_x = usize::MAX; // Signal to set to end of line
+            self.ensure_cursor_visible();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Move cursor right one character, go to next line at boundary
+    /// Returns true if moved to next line
+    pub fn cursor_right(&mut self, line_width: usize) -> bool {
+        let tab = self.current_tab_mut();
+        if line_width > 0 && tab.cursor_x + 1 < line_width {
+            tab.cursor_x += 1;
+            false
+        } else if tab.cursor_index + 1 < tab.node_count() {
+            // Go to next line, cursor at start
+            tab.cursor_index += 1;
+            tab.cursor_x = 0;
+            self.ensure_cursor_visible();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Move cursor to start of current line
+    pub fn cursor_to_line_start(&mut self) {
+        let tab = self.current_tab_mut();
+        tab.cursor_x = 0;
+    }
+
+    /// Move cursor to end of current line
+    pub fn cursor_to_line_end(&mut self, line_width: usize) {
+        let tab = self.current_tab_mut();
+        if line_width > 0 {
+            tab.cursor_x = line_width - 1;
         }
     }
 
     pub fn cursor_to_top(&mut self) {
         let tab = self.current_tab_mut();
         tab.cursor_index = 0;
+        tab.cursor_x = 0;
         tab.scroll_offset = 0;
     }
 
@@ -622,24 +684,16 @@ impl BrowserState {
         let count = tab.node_count();
         if count > 0 {
             tab.cursor_index = count - 1;
+            tab.cursor_x = 0;
             self.ensure_cursor_visible();
         }
-    }
-
-    pub fn cursor_to_line_start(&mut self) {
-        // In a terminal context, this is same as cursor_up to previous section
-        // For now, same as top
-        self.cursor_to_top();
-    }
-
-    pub fn cursor_to_line_end(&mut self) {
-        self.cursor_to_bottom();
     }
 
     pub fn page_up(&mut self) {
         let page_size = (self.terminal_height as usize).saturating_sub(4);
         let tab = self.current_tab_mut();
         tab.cursor_index = tab.cursor_index.saturating_sub(page_size);
+        tab.cursor_x = 0;
         tab.scroll_offset = tab.scroll_offset.saturating_sub(page_size);
     }
 
@@ -648,6 +702,7 @@ impl BrowserState {
         let tab = self.current_tab_mut();
         let max = tab.node_count().saturating_sub(1);
         tab.cursor_index = (tab.cursor_index + page_size).min(max);
+        tab.cursor_x = 0;
         self.ensure_cursor_visible();
     }
 
@@ -662,11 +717,12 @@ impl BrowserState {
         }
     }
 
-    // Element navigation
+    // Element navigation (jump keys reset cursor_x to 0)
     pub fn next_element(&mut self, role: &str) {
         let tab = self.current_tab_mut();
         if let Some(idx) = tab.find_next(role) {
             tab.cursor_index = idx;
+            tab.cursor_x = 0;
             self.ensure_cursor_visible();
         }
     }
@@ -675,6 +731,7 @@ impl BrowserState {
         let tab = self.current_tab_mut();
         if let Some(idx) = tab.find_prev(role) {
             tab.cursor_index = idx;
+            tab.cursor_x = 0;
             self.ensure_cursor_visible();
         }
     }
@@ -683,6 +740,7 @@ impl BrowserState {
         let tab = self.current_tab_mut();
         if let Some(idx) = tab.find_next_visited() {
             tab.cursor_index = idx;
+            tab.cursor_x = 0;
             self.ensure_cursor_visible();
         }
     }
@@ -691,6 +749,7 @@ impl BrowserState {
         let tab = self.current_tab_mut();
         if let Some(idx) = tab.find_prev_visited() {
             tab.cursor_index = idx;
+            tab.cursor_x = 0;
             self.ensure_cursor_visible();
         }
     }
@@ -699,6 +758,7 @@ impl BrowserState {
         let tab = self.current_tab_mut();
         if let Some(idx) = tab.find_next_landmark() {
             tab.cursor_index = idx;
+            tab.cursor_x = 0;
             self.ensure_cursor_visible();
         }
     }
@@ -707,6 +767,7 @@ impl BrowserState {
         let tab = self.current_tab_mut();
         if let Some(idx) = tab.find_prev_landmark() {
             tab.cursor_index = idx;
+            tab.cursor_x = 0;
             self.ensure_cursor_visible();
         }
     }
@@ -715,6 +776,7 @@ impl BrowserState {
         let tab = self.current_tab_mut();
         if let Some(idx) = tab.find_next_focusable() {
             tab.cursor_index = idx;
+            tab.cursor_x = 0;
             self.ensure_cursor_visible();
         }
     }
@@ -723,6 +785,7 @@ impl BrowserState {
         let tab = self.current_tab_mut();
         if let Some(idx) = tab.find_prev_focusable() {
             tab.cursor_index = idx;
+            tab.cursor_x = 0;
             self.ensure_cursor_visible();
         }
     }
@@ -742,6 +805,7 @@ impl BrowserState {
         };
         if let Some(idx) = found {
             tab.cursor_index = idx;
+            tab.cursor_x = 0;
             self.ensure_cursor_visible();
             true
         } else {
@@ -764,6 +828,7 @@ impl BrowserState {
         };
         if let Some(idx) = found {
             tab.cursor_index = idx;
+            tab.cursor_x = 0;
             self.ensure_cursor_visible();
             true
         } else {

@@ -3,15 +3,40 @@
 //! Provides HTML/JS interface for:
 //! - Viewing available models
 //! - Downloading models from HuggingFace
-//! - Configuring AI settings
+//! - Configuring AI and rendering settings
 
-use crate::ai::{available_models, ModelCapability, ModelInfo};
+use crate::ai::{available_downloads, ModelCapability, ModelInfo};
+use crate::shell::Config;
 use std::path::PathBuf;
 
+/// Available AI models (from download module)
+pub fn available_models() -> Vec<ModelInfo> {
+    available_downloads()
+        .into_iter()
+        .map(|d| {
+            // Determine capabilities from model name
+            let capabilities = if d.id.contains("llava") || d.id.contains("moondream") {
+                vec![ModelCapability::Vision, ModelCapability::Text]
+            } else {
+                vec![ModelCapability::Text, ModelCapability::Extraction]
+            };
+
+            ModelInfo {
+                id: d.id,
+                name: d.name,
+                size_bytes: d.size_bytes,
+                downloaded: false, // Will be updated in generate_models_json
+                capabilities,
+            }
+        })
+        .collect()
+}
+
 /// Generate the options HTML page
-pub fn generate_options_html(models_dir: &PathBuf) -> String {
+pub fn generate_options_html(models_dir: &PathBuf, config: &Config) -> String {
     let models = available_models();
     let models_json = generate_models_json(&models, models_dir);
+    let viewport_mode = config.viewport_mode.as_str();
 
     format!(
         r#"<!DOCTYPE html>
@@ -30,14 +55,10 @@ pub fn generate_options_html(models_dir: &PathBuf) -> String {
             --accent: #e94560;
             --accent-hover: #ff6b6b;
             --success: #4ecca3;
-            --border: #333;
+            --border: #444;
         }}
 
-        * {{
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }}
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
 
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -47,15 +68,9 @@ pub fn generate_options_html(models_dir: &PathBuf) -> String {
             padding: 2rem;
         }}
 
-        h1 {{
-            color: var(--accent);
-            margin-bottom: 0.5rem;
-        }}
-
-        .subtitle {{
-            color: var(--text-secondary);
-            margin-bottom: 2rem;
-        }}
+        h1 {{ color: var(--accent); margin-bottom: 0.5rem; }}
+        .subtitle {{ color: var(--text-secondary); margin-bottom: 0.5rem; }}
+        .auto-save {{ color: var(--success); font-size: 0.9rem; margin-bottom: 2rem; }}
 
         .section {{
             background: var(--bg-secondary);
@@ -68,6 +83,8 @@ pub fn generate_options_html(models_dir: &PathBuf) -> String {
             color: var(--text-primary);
             margin-bottom: 1rem;
             font-size: 1.2rem;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 0.5rem;
         }}
 
         .model-card {{
@@ -80,12 +97,10 @@ pub fn generate_options_html(models_dir: &PathBuf) -> String {
             align-items: center;
         }}
 
-        .model-info h3 {{
-            color: var(--text-primary);
-            margin-bottom: 0.25rem;
-        }}
+        .model-info h3 {{ color: var(--text-primary); margin-bottom: 0.25rem; }}
+        .model-size {{ color: var(--text-secondary); font-size: 0.9rem; }}
 
-        .model-info .capabilities {{
+        .capabilities {{
             display: flex;
             gap: 0.5rem;
             margin-top: 0.5rem;
@@ -96,30 +111,9 @@ pub fn generate_options_html(models_dir: &PathBuf) -> String {
             padding: 0.2rem 0.5rem;
             border-radius: 4px;
             font-size: 0.8rem;
-            color: var(--text-secondary);
         }}
-
-        .capability.vision {{
-            color: var(--accent);
-            border: 1px solid var(--accent);
-        }}
-
-        .capability.text {{
-            color: var(--success);
-            border: 1px solid var(--success);
-        }}
-
-        .model-size {{
-            color: var(--text-secondary);
-            font-size: 0.9rem;
-        }}
-
-        .model-actions {{
-            display: flex;
-            flex-direction: column;
-            gap: 0.5rem;
-            align-items: flex-end;
-        }}
+        .capability.vision {{ color: var(--accent); border: 1px solid var(--accent); }}
+        .capability.text {{ color: var(--success); border: 1px solid var(--success); }}
 
         button {{
             background: var(--accent);
@@ -129,45 +123,38 @@ pub fn generate_options_html(models_dir: &PathBuf) -> String {
             border-radius: 4px;
             cursor: pointer;
             font-size: 0.9rem;
-            transition: background 0.2s;
         }}
+        button:hover {{ background: var(--accent-hover); }}
+        button:disabled {{ background: var(--border); cursor: not-allowed; }}
+        button.downloaded {{ background: var(--success); }}
+        button.downloading {{ background: #f39c12; animation: pulse 1.5s infinite; }}
 
-        button:hover {{
-            background: var(--accent-hover);
-        }}
-
-        button:disabled {{
-            background: var(--border);
-            cursor: not-allowed;
-        }}
-
-        button.downloaded {{
-            background: var(--success);
+        @keyframes pulse {{
+            0%, 100% {{ opacity: 1; }}
+            50% {{ opacity: 0.7; }}
         }}
 
         .progress-bar {{
-            width: 150px;
-            height: 6px;
-            background: var(--border);
-            border-radius: 3px;
+            margin-top: 0.5rem;
+            background: var(--bg-secondary);
+            border-radius: 4px;
+            height: 20px;
+            position: relative;
             overflow: hidden;
-            display: none;
         }}
-
-        .progress-bar.active {{
-            display: block;
-        }}
-
-        .progress-bar .fill {{
+        .progress-fill {{
             height: 100%;
-            background: var(--accent);
-            width: 0%;
-            transition: width 0.3s;
+            background: linear-gradient(90deg, var(--accent), var(--success));
+            transition: width 0.3s ease;
         }}
-
-        .status {{
-            font-size: 0.8rem;
-            color: var(--text-secondary);
+        .progress-text {{
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 0.75rem;
+            color: white;
+            text-shadow: 0 0 2px black;
         }}
 
         .settings-row {{
@@ -177,18 +164,65 @@ pub fn generate_options_html(models_dir: &PathBuf) -> String {
             padding: 0.75rem 0;
             border-bottom: 1px solid var(--border);
         }}
+        .settings-row:last-child {{ border-bottom: none; }}
 
-        .settings-row:last-child {{
-            border-bottom: none;
+        .settings-row label {{
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }}
+
+        /* Accessible select with marker */
+        .select-wrapper {{
+            position: relative;
+            display: inline-block;
+        }}
+        .select-wrapper::before {{
+            content: "[▼ ";
+            color: var(--accent);
+            pointer-events: none;
+        }}
+        .select-wrapper::after {{
+            content: "]";
+            color: var(--accent);
+            pointer-events: none;
         }}
 
         select {{
             background: var(--bg-card);
             color: var(--text-primary);
             border: 1px solid var(--border);
-            padding: 0.5rem;
+            padding: 0.5rem 2rem 0.5rem 0.5rem;
             border-radius: 4px;
             font-size: 0.9rem;
+            appearance: none;
+            cursor: pointer;
+        }}
+        select:focus {{
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+        }}
+
+        /* Accessible checkbox with marker */
+        .checkbox-wrapper {{
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            cursor: pointer;
+        }}
+        .checkbox-wrapper input[type="checkbox"] {{
+            display: none;
+        }}
+        .checkbox-marker {{
+            font-family: monospace;
+            font-size: 1.1rem;
+            color: var(--accent);
+        }}
+        .checkbox-wrapper input:checked + .checkbox-marker::before {{
+            content: "[x] ";
+        }}
+        .checkbox-wrapper input:not(:checked) + .checkbox-marker::before {{
+            content: "[ ] ";
         }}
 
         .backend-status {{
@@ -203,14 +237,8 @@ pub fn generate_options_html(models_dir: &PathBuf) -> String {
             border-radius: 50%;
             background: var(--border);
         }}
-
-        .status-dot.online {{
-            background: var(--success);
-        }}
-
-        .status-dot.offline {{
-            background: var(--accent);
-        }}
+        .status-dot.online {{ background: var(--success); }}
+        .status-dot.offline {{ background: var(--accent); }}
 
         footer {{
             margin-top: 2rem;
@@ -218,56 +246,83 @@ pub fn generate_options_html(models_dir: &PathBuf) -> String {
             color: var(--text-secondary);
             font-size: 0.9rem;
         }}
+        footer a {{ color: var(--accent); text-decoration: none; }}
 
-        footer a {{
-            color: var(--accent);
-            text-decoration: none;
-        }}
+        .hidden {{ display: none !important; }}
     </style>
 </head>
 <body>
     <h1>abrowser Options</h1>
     <p class="subtitle">AI Settings and Model Management</p>
+    <p class="auto-save">Options are saved automatically when changed.</p>
 
     <div class="section">
-        <h2>Backend Status</h2>
+        <h2>Rendering</h2>
         <div class="settings-row">
-            <span>Ollama Server</span>
-            <div class="backend-status">
-                <div class="status-dot" id="ollama-status"></div>
-                <span id="ollama-status-text">Checking...</span>
-            </div>
+            <label class="checkbox-wrapper" onclick="toggleCheckbox('show-images')">
+                <input type="checkbox" id="show-images" {show_images_checked} onchange="saveOptions()">
+                <span class="checkbox-marker"></span>
+                <span>Show images in page</span>
+            </label>
+        </div>
+        <div class="settings-row" id="auto-describe-row">
+            <label class="checkbox-wrapper" onclick="toggleCheckbox('auto-describe')">
+                <input type="checkbox" id="auto-describe" {auto_describe_checked} onchange="saveOptions()">
+                <span class="checkbox-marker"></span>
+                <span>Auto-describe images (requires vision model)</span>
+            </label>
         </div>
         <div class="settings-row">
-            <span>Local Models</span>
-            <div class="backend-status">
-                <div class="status-dot" id="local-status"></div>
-                <span id="local-status-text">Not configured</span>
-            </div>
+            <label for="viewport-mode">Browser viewport</label>
+            <span class="select-wrapper">
+                <select id="viewport-mode" onchange="saveOptions()">
+                    <option value="desktop" {desktop_selected}>Desktop (1920x1080)</option>
+                    <option value="mobile" {mobile_selected}>Mobile (375x812)</option>
+                </select>
+            </span>
         </div>
     </div>
 
     <div class="section">
-        <h2>AI Models</h2>
+        <h2>AI Backend</h2>
+        <div class="settings-row">
+            <span>Local llama.cpp</span>
+            <div class="backend-status">
+                <div class="status-dot" id="backend-status"></div>
+                <span id="backend-status-text">Checking models...</span>
+            </div>
+        </div>
+        <div class="settings-row">
+            <span>Models directory</span>
+            <span id="models-dir" style="color: var(--text-secondary); font-size: 0.9rem;">{models_dir}</span>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>AI Models (Local GGUF)</h2>
+        <p style="color: var(--text-secondary); margin-bottom: 1rem; font-size: 0.9rem;">
+            Download GGUF models from HuggingFace and place them in the models directory.
+        </p>
+        <div class="settings-row">
+            <label for="vision-model">Image description model</label>
+            <span class="select-wrapper">
+                <select id="vision-model" onchange="saveOptions()">
+                    <option value="llava">LLaVA (Q4_K_M)</option>
+                    <option value="moondream">Moondream2 (Q4)</option>
+                </select>
+            </span>
+        </div>
+        <div class="settings-row">
+            <label for="text-model">Text generation model</label>
+            <span class="select-wrapper">
+                <select id="text-model" onchange="saveOptions()">
+                    <option value="gemma-2b">Gemma 2B (Q4) - Light</option>
+                    <option value="gemma-7b">Gemma 7B (Q4) - Medium</option>
+                    <option value="llama-3-8b">Llama 3 8B (Q4) - Large</option>
+                </select>
+            </span>
+        </div>
         <div id="models-list"></div>
-    </div>
-
-    <div class="section">
-        <h2>Settings</h2>
-        <div class="settings-row">
-            <label for="vision-model">Image Description Model</label>
-            <select id="vision-model">
-                <option value="llava">LLaVA (via Ollama)</option>
-                <option value="llava-local">LLaVA (Local)</option>
-            </select>
-        </div>
-        <div class="settings-row">
-            <label for="text-model">Text Generation Model</label>
-            <select id="text-model">
-                <option value="gemma3">Gemma 3 (via Ollama)</option>
-                <option value="gemma3-local">Gemma 3 (Local)</option>
-            </select>
-        </div>
     </div>
 
     <footer>
@@ -277,33 +332,53 @@ pub fn generate_options_html(models_dir: &PathBuf) -> String {
 
     <script>
         const MODELS = {models_json};
-        const MODELS_DIR = "{models_dir}";
 
-        // Check Ollama status
-        async function checkOllama() {{
-            const dot = document.getElementById('ollama-status');
-            const text = document.getElementById('ollama-status-text');
-            try {{
-                const resp = await fetch('http://localhost:11434/api/tags');
-                if (resp.ok) {{
-                    const data = await resp.json();
-                    dot.classList.add('online');
-                    dot.classList.remove('offline');
-                    text.textContent = `Online (${{data.models?.length || 0}} models)`;
-                }} else {{
-                    throw new Error('Not OK');
-                }}
-            }} catch (e) {{
-                dot.classList.add('offline');
-                dot.classList.remove('online');
-                text.textContent = 'Offline - run: ollama serve';
+        function toggleCheckbox(id) {{
+            const cb = document.getElementById(id);
+            cb.checked = !cb.checked;
+            cb.dispatchEvent(new Event('change'));
+        }}
+
+        function updateAutoDescribeVisibility() {{
+            const showImages = document.getElementById('show-images').checked;
+            const row = document.getElementById('auto-describe-row');
+            if (showImages) {{
+                row.classList.remove('hidden');
+            }} else {{
+                row.classList.add('hidden');
+                document.getElementById('auto-describe').checked = false;
             }}
         }}
 
-        // Render model cards
+        document.getElementById('show-images').addEventListener('change', updateAutoDescribeVisibility);
+
+        function checkBackend() {{
+            const dot = document.getElementById('backend-status');
+            const text = document.getElementById('backend-status-text');
+            const downloadedModels = MODELS.filter(m => m.downloaded);
+            if (downloadedModels.length > 0) {{
+                dot.classList.add('online');
+                dot.classList.remove('offline');
+                text.textContent = `Ready (${{downloadedModels.length}} model${{downloadedModels.length > 1 ? 's' : ''}} found)`;
+            }} else {{
+                dot.classList.add('offline');
+                dot.classList.remove('online');
+                text.textContent = 'No models found - download GGUF files';
+            }}
+        }}
+
+        // Track downloading models
+        const downloadingModels = new Set();
+
         function renderModels() {{
             const container = document.getElementById('models-list');
-            container.innerHTML = MODELS.map(model => `
+            container.innerHTML = MODELS.map(model => {{
+                const isDownloading = downloadingModels.has(model.id);
+                const buttonClass = model.downloaded ? 'downloaded' : (isDownloading ? 'downloading' : '');
+                const buttonText = model.downloaded ? 'Downloaded' : (isDownloading ? 'Downloading...' : 'Download');
+                const buttonDisabled = model.downloaded || isDownloading;
+
+                return `
                 <div class="model-card" data-id="${{model.id}}">
                     <div class="model-info">
                         <h3>${{model.name}}</h3>
@@ -313,22 +388,22 @@ pub fn generate_options_html(models_dir: &PathBuf) -> String {
                                 `<span class="capability ${{c.toLowerCase()}}">${{c}}</span>`
                             ).join('')}}
                         </div>
-                    </div>
-                    <div class="model-actions">
-                        <button
-                            onclick="downloadModel('${{model.id}}')"
-                            class="${{model.downloaded ? 'downloaded' : ''}}"
-                            ${{model.downloaded ? 'disabled' : ''}}
-                        >
-                            ${{model.downloaded ? '✓ Downloaded' : 'Download'}}
-                        </button>
-                        <div class="progress-bar" id="progress-${{model.id}}">
-                            <div class="fill"></div>
+                        <div class="progress-bar" id="progress-${{model.id}}" style="display: ${{isDownloading ? 'block' : 'none'}}">
+                            <div class="progress-fill" id="progress-fill-${{model.id}}" style="width: 0%"></div>
+                            <span class="progress-text" id="progress-text-${{model.id}}">0%</span>
                         </div>
-                        <div class="status" id="status-${{model.id}}"></div>
                     </div>
+                    <button
+                        id="btn-${{model.id}}"
+                        onclick="downloadModel('${{model.id}}')"
+                        class="${{buttonClass}}"
+                        ${{buttonDisabled ? 'disabled' : ''}}
+                    >
+                        ${{buttonText}}
+                    </button>
                 </div>
-            `).join('');
+            `;
+            }}).join('');
         }}
 
         function formatSize(bytes) {{
@@ -336,65 +411,118 @@ pub fn generate_options_html(models_dir: &PathBuf) -> String {
             return `${{gb.toFixed(1)}} GB`;
         }}
 
-        async function downloadModel(modelId) {{
-            const progressBar = document.getElementById(`progress-${{modelId}}`);
-            const fill = progressBar.querySelector('.fill');
-            const status = document.getElementById(`status-${{modelId}}`);
-            const button = document.querySelector(`[data-id="${{modelId}}"] button`);
+        function downloadModel(modelId) {{
+            // Mark as downloading
+            downloadingModels.add(modelId);
+            renderModels();
 
-            progressBar.classList.add('active');
-            button.disabled = true;
-            button.textContent = 'Downloading...';
+            // Signal abrowser to start download via localStorage (polled by abrowser)
+            localStorage.setItem('abrowser_download_cmd', modelId);
+            console.log('ABROWSER_DOWNLOAD:' + modelId);
+        }}
 
-            // Model URLs (HuggingFace)
-            const urls = {{
-                'llava-v1.5-7b-q4': 'https://huggingface.co/mys/ggml_llava-v1.5-7b/resolve/main/ggml-model-q4_k.gguf',
-                'gemma-3-4b-q4': 'https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf/resolve/main/gemma-3-4b-it-q4_0.gguf'
+        // Track download speed
+        const downloadStats = {{}};
+
+        function formatSpeed(bytesPerSec) {{
+            if (bytesPerSec < 1024) return bytesPerSec.toFixed(0) + ' B/s';
+            if (bytesPerSec < 1024 * 1024) return (bytesPerSec / 1024).toFixed(1) + ' KB/s';
+            return (bytesPerSec / (1024 * 1024)).toFixed(2) + ' MB/s';
+        }}
+
+        // Handle download progress updates from abrowser
+        window.updateDownloadProgress = function(modelId, downloaded, total) {{
+            const progressBar = document.getElementById('progress-' + modelId);
+            const progressFill = document.getElementById('progress-fill-' + modelId);
+            const progressText = document.getElementById('progress-text-' + modelId);
+
+            if (progressBar && progressFill && progressText) {{
+                progressBar.style.display = 'block';
+                const percent = total > 0 ? Math.round((downloaded / total) * 100) : 0;
+                progressFill.style.width = percent + '%';
+
+                // Calculate speed
+                const now = Date.now();
+                let speedText = '';
+                if (!downloadStats[modelId]) {{
+                    downloadStats[modelId] = {{ lastBytes: downloaded, lastTime: now, speed: 0 }};
+                }} else {{
+                    const stats = downloadStats[modelId];
+                    const timeDelta = (now - stats.lastTime) / 1000; // seconds
+                    if (timeDelta > 0.5) {{ // Update speed every 500ms
+                        const bytesDelta = downloaded - stats.lastBytes;
+                        stats.speed = bytesDelta / timeDelta;
+                        stats.lastBytes = downloaded;
+                        stats.lastTime = now;
+                    }}
+                    if (stats.speed > 0) {{
+                        speedText = ' @ ' + formatSpeed(stats.speed);
+                    }}
+                }}
+
+                progressText.textContent = percent + '% (' + formatSize(downloaded) + ' / ' + formatSize(total) + ')' + speedText;
+            }}
+        }};
+
+        // Handle download completion from abrowser
+        window.downloadComplete = function(modelId, success, message) {{
+            downloadingModels.delete(modelId);
+            delete downloadStats[modelId]; // Clear speed tracking
+            if (success) {{
+                // Update the model as downloaded
+                const model = MODELS.find(m => m.id === modelId);
+                if (model) model.downloaded = true;
+                checkBackend();
+            }} else {{
+                alert('Download failed: ' + message);
+            }}
+            renderModels();
+        }};
+
+        function saveOptions() {{
+            const options = {{
+                show_images: document.getElementById('show-images').checked,
+                auto_describe: document.getElementById('auto-describe').checked,
+                viewport_mode: document.getElementById('viewport-mode').value,
+                vision_model: document.getElementById('vision-model').value,
+                text_model: document.getElementById('text-model').value
             }};
 
-            const url = urls[modelId];
-            if (!url) {{
-                status.textContent = 'Unknown model';
-                return;
-            }}
+            // Save via localStorage for now (will be picked up by abrowser)
+            localStorage.setItem('abrowser_options', JSON.stringify(options));
 
-            try {{
-                status.textContent = 'Starting download...';
-
-                // In a real implementation, we'd use a Rust backend for this
-                // For now, show instructions
-                status.textContent = 'Use: ollama pull llava';
-                button.textContent = 'See instructions';
-                progressBar.classList.remove('active');
-
-            }} catch (e) {{
-                status.textContent = `Error: ${{e.message}}`;
-                button.disabled = false;
-                button.textContent = 'Retry';
-                progressBar.classList.remove('active');
-            }}
+            // Also try to communicate back to abrowser via console
+            console.log('ABROWSER_OPTIONS:' + JSON.stringify(options));
         }}
 
         // Initialize
-        checkOllama();
+        checkBackend();
         renderModels();
-
-        // Refresh status periodically
-        setInterval(checkOllama, 5000);
+        updateAutoDescribeVisibility();
     </script>
 </body>
 </html>"#,
         models_json = models_json,
-        models_dir = models_dir.display()
+        models_dir = models_dir.display(),
+        desktop_selected = if viewport_mode == "desktop" { "selected" } else { "" },
+        mobile_selected = if viewport_mode == "mobile" { "selected" } else { "" },
+        show_images_checked = if config.rendering.show_images { "checked" } else { "" },
+        auto_describe_checked = if config.rendering.auto_describe { "checked" } else { "" },
     )
 }
 
 fn generate_models_json(models: &[ModelInfo], models_dir: &PathBuf) -> String {
+    use crate::ai::download::get_download_info;
+
     let models_with_status: Vec<serde_json::Value> = models
         .iter()
         .map(|m| {
-            let model_path = models_dir.join(format!("{}.gguf", m.id));
-            let downloaded = model_path.exists();
+            // Check using download module's filename
+            let downloaded = if let Some(info) = get_download_info(&m.id) {
+                models_dir.join(&info.filename).exists()
+            } else {
+                models_dir.join(format!("{}.gguf", m.id)).exists()
+            };
 
             serde_json::json!({
                 "id": m.id,
@@ -411,11 +539,4 @@ fn generate_models_json(models: &[ModelInfo], models_dir: &PathBuf) -> String {
         .collect();
 
     serde_json::to_string(&models_with_status).unwrap_or_else(|_| "[]".to_string())
-}
-
-/// Open options in browser
-pub fn open_options_data_url(models_dir: &PathBuf) -> String {
-    let html = generate_options_html(models_dir);
-    let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, html.as_bytes());
-    format!("data:text/html;base64,{}", encoded)
 }

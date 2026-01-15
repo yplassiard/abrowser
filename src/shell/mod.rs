@@ -7,7 +7,7 @@ mod render;
 mod state;
 mod tasks;
 
-pub use config::{Config, ViewportMode};
+pub use config::{Config, RenderingConfig, ViewportMode};
 pub use media::{MediaController, MediaStatus};
 pub use state::{BrowserState, FocusMode, Tab};
 use config::ViewportMode as VP;
@@ -49,6 +49,8 @@ pub struct Shell {
     pending_refresh: tasks::PendingRefresh,
     /// AI image describer
     image_describer: ImageDescriber,
+    /// Model downloader
+    model_downloader: crate::ai::ModelDownloader,
 }
 
 impl Shell {
@@ -70,12 +72,20 @@ impl Shell {
             ImageDescriber::new(None, None)
         };
 
+        // Create model downloader
+        let models_dir = dirs::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("abrowser")
+            .join("models");
+        let model_downloader = crate::ai::ModelDownloader::new(models_dir);
+
         Ok(Self {
             state: BrowserState::new().with_viewport(viewport_mode),
             launcher,
             config,
             pending_refresh: tasks::PendingRefresh::new(),
             image_describer,
+            model_downloader,
         })
     }
 
@@ -179,6 +189,13 @@ impl Shell {
                     if self.handle_key(key).await? {
                         break; // Exit requested
                     }
+                }
+            }
+
+            // Check for download commands from options page (every ~500ms)
+            if refresh_counter % 10 == 0 {
+                if let Some(model_id) = self.check_options_console().await {
+                    self.start_model_download(&model_id).await;
                 }
             }
         }
@@ -385,6 +402,72 @@ impl Shell {
         self.state.current_tab_mut().needs_tree_refresh = true;
     }
 
+    /// Get the width of the current line (for cursor movement)
+    fn current_line_width(&self) -> usize {
+        let tab = self.state.current_tab();
+        if let Some(node) = tab.current_node() {
+            let (prefix, content) = render::format_node_public(node);
+            prefix.chars().count() + content.chars().count()
+        } else {
+            0
+        }
+    }
+
+    /// Find what clickable element (if any) is at the cursor position
+    /// Returns the handle to click, or None if nothing clickable at cursor
+    fn find_clickable_at_cursor(
+        &self,
+        line: &str,
+        cursor_x: usize,
+        contains_role: &Option<crate::accessibility::Role>,
+        contained_handle: &Option<NodeHandle>,
+        node_handle: &Option<NodeHandle>,
+    ) -> Option<NodeHandle> {
+        let chars: Vec<char> = line.chars().collect();
+        if cursor_x >= chars.len() || line.is_empty() {
+            return None;
+        }
+
+        // If node contains an interactive child (link/button), check if cursor
+        // is specifically on that child's markers - if so, use contained_handle
+        if contains_role.is_some() && contained_handle.is_some() {
+            let mut bracket_start = None;
+            let mut in_link = false;
+            let mut in_button = false;
+
+            for (i, &ch) in chars.iter().enumerate() {
+                if ch == '[' && !in_button {
+                    bracket_start = Some(i);
+                    in_link = true;
+                } else if ch == ']' && in_link {
+                    if let Some(start) = bracket_start {
+                        if cursor_x >= start && cursor_x <= i {
+                            // Cursor is inside contained link brackets
+                            return contained_handle.clone();
+                        }
+                    }
+                    in_link = false;
+                    bracket_start = None;
+                } else if ch == '<' && !in_link {
+                    bracket_start = Some(i);
+                    in_button = true;
+                } else if ch == '>' && in_button {
+                    if let Some(start) = bracket_start {
+                        if cursor_x >= start && cursor_x <= i {
+                            // Cursor is inside contained button brackets
+                            return contained_handle.clone();
+                        }
+                    }
+                    in_button = false;
+                    bracket_start = None;
+                }
+            }
+        }
+
+        // Cursor is within the line - return main element's handle
+        node_handle.clone()
+    }
+
     /// Scroll browser to top of page
     async fn scroll_browser_to_top(&mut self) {
         {
@@ -441,6 +524,10 @@ impl Shell {
             (KeyModifiers::CONTROL, KeyCode::Char('o')) => {
                 self.open_file_dialog().await?;
             }
+            // Help screen (F1)
+            (_, KeyCode::F(1)) => {
+                self.open_help().await?;
+            }
             // Options dialog (F2)
             (_, KeyCode::F(2)) => {
                 self.open_options().await?;
@@ -475,7 +562,7 @@ impl Shell {
             (KeyModifiers::ALT, KeyCode::Char(c)) if c.is_ascii_digit() => {
                 // Alt+0-9 to switch tabs (Ctrl+number doesn't work in terminals)
                 let tab_num = c.to_digit(10).unwrap() as usize;
-                self.switch_tab(tab_num)?;
+                self.switch_tab(tab_num).await?;
             }
             (KeyModifiers::CONTROL, KeyCode::Home) => {
                 self.state.cursor_to_top();
@@ -496,11 +583,11 @@ impl Shell {
                 self.focus_current_in_browser().await;
             }
             (KeyModifiers::NONE, KeyCode::Home) => {
-                self.state.cursor_to_line_start();
+                self.state.cursor_to_top();
                 self.focus_current_in_browser().await;
             }
             (KeyModifiers::NONE, KeyCode::End) => {
-                self.state.cursor_to_line_end();
+                self.state.cursor_to_bottom();
                 self.focus_current_in_browser().await;
             }
             (KeyModifiers::NONE, KeyCode::PageUp) => {
@@ -513,11 +600,32 @@ impl Shell {
                 self.scroll_browser_viewport(500).await;
                 self.focus_current_in_browser().await;
             }
-            // History navigation (left/right arrows)
+            // Ctrl+A: beginning of line, Ctrl+E: end of line
+            (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
+                self.state.cursor_to_line_start();
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('e')) => {
+                let line_width = self.current_line_width();
+                self.state.cursor_to_line_end(line_width);
+            }
+            // Left/Right: move cursor, navigate to prev/next line at boundaries
             (KeyModifiers::NONE, KeyCode::Left) => {
-                self.navigate_back().await?;
+                let moved_line = self.state.cursor_left();
+                if moved_line {
+                    // Moved to previous line, set cursor to end
+                    let line_width = self.current_line_width();
+                    self.state.cursor_to_line_end(line_width);
+                }
             }
             (KeyModifiers::NONE, KeyCode::Right) => {
+                let line_width = self.current_line_width();
+                self.state.cursor_right(line_width);
+            }
+            // History navigation (Alt+Left/Right)
+            (KeyModifiers::ALT, KeyCode::Left) => {
+                self.navigate_back().await?;
+            }
+            (KeyModifiers::ALT, KeyCode::Right) => {
                 self.navigate_forward().await?;
             }
             // History menu
@@ -699,11 +807,11 @@ impl Shell {
             }
             (_, KeyCode::Char('<')) => {
                 // Previous tab
-                self.prev_tab();
+                self.prev_tab().await;
             }
             (_, KeyCode::Char('>')) => {
                 // Next tab
-                self.next_tab();
+                self.next_tab().await;
             }
             (KeyModifiers::NONE, KeyCode::Char('[')) => {
                 // Slower playback
@@ -940,6 +1048,7 @@ impl Shell {
         // Pre-fill with current URL
         let current_url = self.state.current_tab().url.clone();
         let mut input = current_url.clone();
+        let mut select_all = true; // First char typed replaces entire input
 
         // Show address bar prompt with current URL
         self.state.show_input_prompt("URL: ");
@@ -963,11 +1072,13 @@ impl Shell {
                     KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         // Ctrl+U: clear input
                         input.clear();
+                        select_all = false;
                         self.state.set_input_value(&input);
                         self.render()?;
                     }
                     KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         // Ctrl+W: delete word backwards
+                        select_all = false;
                         while input.ends_with(char::is_whitespace) {
                             input.pop();
                         }
@@ -978,14 +1089,29 @@ impl Shell {
                         self.render()?;
                     }
                     KeyCode::Char(c) => {
+                        if select_all {
+                            // Replace entire input with typed character
+                            input.clear();
+                            select_all = false;
+                        }
                         input.push(c);
                         self.state.set_input_value(&input);
                         self.render()?;
                     }
                     KeyCode::Backspace => {
-                        input.pop();
+                        if select_all {
+                            // Delete all when "selected"
+                            input.clear();
+                            select_all = false;
+                        } else {
+                            input.pop();
+                        }
                         self.state.set_input_value(&input);
                         self.render()?;
+                    }
+                    KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End => {
+                        // Arrow keys cancel selection
+                        select_all = false;
                     }
                     _ => {}
                 }
@@ -1352,12 +1478,16 @@ impl Shell {
             self.state.set_status("Cannot close last tab");
             return Ok(());
         }
+        // Save options if closing options tab
+        let _ = self.save_options_from_page().await;
         self.state.close_current_tab();
         self.state.set_status("Tab closed");
         Ok(())
     }
 
-    fn switch_tab(&mut self, tab_num: usize) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn switch_tab(&mut self, tab_num: usize) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Save options if switching away from options tab
+        let _ = self.save_options_from_page().await;
         if tab_num < self.state.tabs.len() {
             self.state.current_tab_index = tab_num;
             self.state.set_status(&format!("Switched to tab {}", tab_num));
@@ -1365,7 +1495,9 @@ impl Shell {
         Ok(())
     }
 
-    fn next_tab(&mut self) {
+    async fn next_tab(&mut self) {
+        // Save options if switching away from options tab
+        let _ = self.save_options_from_page().await;
         let num_tabs = self.state.tabs.len();
         if num_tabs > 1 {
             self.state.current_tab_index = (self.state.current_tab_index + 1) % num_tabs;
@@ -1373,7 +1505,9 @@ impl Shell {
         }
     }
 
-    fn prev_tab(&mut self) {
+    async fn prev_tab(&mut self) {
+        // Save options if switching away from options tab
+        let _ = self.save_options_from_page().await;
         let num_tabs = self.state.tabs.len();
         if num_tabs > 1 {
             self.state.current_tab_index = if self.state.current_tab_index == 0 {
@@ -1431,19 +1565,192 @@ impl Shell {
             .join("abrowser")
             .join("models");
 
-        // Generate HTML and write to temp file
-        let html = generate_options_html(&models_dir);
-        let temp_path = std::env::temp_dir().join("abrowser_options.html");
-        std::fs::write(&temp_path, &html)?;
+        // Generate HTML
+        let html = generate_options_html(&models_dir, &self.config);
 
-        let file_url = format!("file://{}", temp_path.display());
+        // Create a new tab with a blank page session directly (bypass open_url to avoid blocking)
+        self.state.add_tab();
+        let session = self.launcher.create_page("about:blank").await?;
 
-        // Open in new tab
-        self.new_tab().await?;
-        self.open_url(&file_url).await?;
+        // Set the document content directly (avoids data URL localStorage issues)
+        session.set_document_content(&html).await?;
+
+        let session: std::sync::Arc<dyn crate::backend::PageSession> = std::sync::Arc::from(session);
+
+        // Store session and update state
+        let tab = self.state.current_tab_mut();
+        tab.url = "about:blank".to_string();
+        tab.title = "Options".to_string();
+        tab.session = Some(session);
+        tab.needs_tree_refresh = true;
+
+        // Brief wait for content to render, then refresh tree
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        self.start_background_refresh();
         self.state.set_status("Options opened");
 
         Ok(())
+    }
+
+    /// Open the help screen in a new tab
+    async fn open_help(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use crate::ui::help::generate_help_html;
+
+        // Generate HTML with current config (for actual keybindings)
+        let html = generate_help_html(&self.config);
+
+        // Create a new tab with a blank page session
+        self.state.add_tab();
+        let session = self.launcher.create_page("about:blank").await?;
+
+        // Set the document content directly
+        session.set_document_content(&html).await?;
+
+        let session: std::sync::Arc<dyn crate::backend::PageSession> = std::sync::Arc::from(session);
+
+        // Store session and update state
+        let tab = self.state.current_tab_mut();
+        tab.url = "about:blank".to_string();
+        tab.title = "Help".to_string();
+        tab.session = Some(session);
+        tab.needs_tree_refresh = true;
+
+        // Brief wait for content to render, then refresh tree
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        self.start_background_refresh();
+        self.state.set_status("Help opened (F1)");
+
+        Ok(())
+    }
+
+    /// Read options from the options page and save to config
+    async fn save_options_from_page(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Only process if current tab is Options
+        if self.state.current_tab().title != "Options" {
+            return Ok(());
+        }
+
+        if let Some(ref session) = self.state.current_tab().session {
+            // Read localStorage value
+            let result = session.evaluate_js("localStorage.getItem('abrowser_options')").await?;
+
+            if let Some(json_str) = result.as_str() {
+                // Parse JSON options
+                if let Ok(options) = serde_json::from_str::<serde_json::Value>(json_str) {
+                    // Update config from parsed options
+                    if let Some(show_images) = options.get("show_images").and_then(|v| v.as_bool()) {
+                        self.config.rendering.show_images = show_images;
+                    }
+                    if let Some(auto_describe) = options.get("auto_describe").and_then(|v| v.as_bool()) {
+                        self.config.rendering.auto_describe = auto_describe;
+                    }
+                    if let Some(viewport_mode) = options.get("viewport_mode").and_then(|v| v.as_str()) {
+                        self.config.viewport_mode = match viewport_mode {
+                            "mobile" => VP::Mobile,
+                            _ => VP::Desktop,
+                        };
+                    }
+                    if let Some(vision_model) = options.get("vision_model").and_then(|v| v.as_str()) {
+                        self.config.ai.model = vision_model.to_string();
+                    }
+
+                    // Save config to file
+                    if let Err(e) = self.config.save() {
+                        self.state.set_status(&format!("Failed to save config: {}", e));
+                    } else {
+                        self.state.set_status("Options saved");
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Start downloading a model and update the options page with progress
+    async fn start_model_download(&mut self, model_id: &str) {
+        use crate::ai::download::download_model;
+
+        let models_dir = dirs::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("abrowser")
+            .join("models");
+
+        let model_id_owned = model_id.to_string();
+        let session_clone = self.state.current_tab().session.clone();
+
+        self.state.set_status(&format!("Downloading {}...", model_id));
+
+        // Spawn download task
+        let download_handle = tokio::spawn(async move {
+            let model_id_for_progress = model_id_owned.clone();
+            let session_for_progress = session_clone.clone();
+
+            let progress_callback: crate::ai::download::ProgressCallback = Box::new(move |downloaded, total| {
+                // Update progress in the options page
+                if let Some(ref session) = session_for_progress {
+                    let js = format!(
+                        "if (window.updateDownloadProgress) window.updateDownloadProgress('{}', {}, {});",
+                        model_id_for_progress, downloaded, total
+                    );
+                    let session = session.clone();
+                    tokio::spawn(async move {
+                        let _ = session.evaluate_js(&js).await;
+                    });
+                }
+            });
+
+            download_model(&model_id_owned, &models_dir, Some(progress_callback)).await
+        });
+
+        // Wait for download and notify completion
+        match download_handle.await {
+            Ok(Ok(_path)) => {
+                if let Some(ref session) = self.state.current_tab().session {
+                    let js = format!(
+                        "if (window.downloadComplete) window.downloadComplete('{}', true, 'Success');",
+                        model_id
+                    );
+                    let _ = session.evaluate_js(&js).await;
+                }
+                self.state.set_status(&format!("Downloaded {}", model_id));
+            }
+            Ok(Err(e)) => {
+                if let Some(ref session) = self.state.current_tab().session {
+                    let js = format!(
+                        "if (window.downloadComplete) window.downloadComplete('{}', false, '{}');",
+                        model_id,
+                        e.replace('\'', "\\'")
+                    );
+                    let _ = session.evaluate_js(&js).await;
+                }
+                self.state.set_status(&format!("Download failed: {}", e));
+            }
+            Err(e) => {
+                self.state.set_status(&format!("Download task failed: {}", e));
+            }
+        }
+    }
+
+    /// Check for console messages from options page (download requests)
+    async fn check_options_console(&mut self) -> Option<String> {
+        if self.state.current_tab().title != "Options" {
+            return None;
+        }
+
+        if let Some(ref session) = self.state.current_tab().session {
+            // Check for pending download command in localStorage
+            let result = session.evaluate_js(
+                "(() => { const cmd = localStorage.getItem('abrowser_download_cmd'); localStorage.removeItem('abrowser_download_cmd'); return cmd; })()"
+            ).await.ok()?;
+
+            if let Some(cmd) = result.as_str() {
+                if !cmd.is_empty() && cmd != "null" {
+                    return Some(cmd.to_string());
+                }
+            }
+        }
+        None
     }
 
     async fn save_page(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -1557,14 +1864,17 @@ impl Shell {
     }
 
     async fn activate_current_element(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Get node info while we have immutable borrow
-        let (role, name, handle): (String, String, Option<NodeHandle>) = {
+        // Get node info and cursor position
+        let (role, name, handle, cursor_x, contains_role, contained_handle): (String, String, Option<NodeHandle>, usize, Option<crate::accessibility::Role>, Option<NodeHandle>) = {
             let tab = self.state.current_tab();
             if let Some(node) = tab.current_node() {
                 (
                     node.role_str().to_lowercase(),
                     node.name_str().to_string(),
                     node.handle.clone(),
+                    tab.cursor_x,
+                    node.contains_role.clone(),
+                    node.contained_handle.clone(),
                 )
             } else {
                 self.state.set_status("No element selected");
@@ -1572,6 +1882,27 @@ impl Shell {
             }
         };
 
+        // Get the formatted line to check what's at cursor_x
+        let (prefix, content) = {
+            let tab = self.state.current_tab();
+            if let Some(node) = tab.current_node() {
+                render::format_node_public(node)
+            } else {
+                (String::new(), String::new())
+            }
+        };
+        let line = format!("{}{}", prefix, content);
+
+        // Check if cursor is on a clickable region
+        // Links are marked with [...], buttons with < ... >
+        if let Some(clickable) = self.find_clickable_at_cursor(&line, cursor_x, &contains_role, &contained_handle, &handle) {
+            self.state.set_status(&format!("Clicking: {}", &name));
+            self.render()?;
+            self.click_element(&clickable).await?;
+            return Ok(());
+        }
+
+        // If cursor isn't on a clickable region, check if the node itself is interactive
         self.state.set_status(&format!("Activating: {}", &name));
         self.render()?;
 
@@ -1593,10 +1924,18 @@ impl Shell {
             }
             "checkbox" | "radiobutton" => {
                 if let Some(handle) = handle {
-                    self.click_element(&handle).await?;
+                    self.toggle_checkbox(&handle, &role).await?;
                 }
             }
-            "textbox" | "textarea" | "textfield" | "searchbox" | "combobox" => {
+            "combobox" | "listbox" => {
+                // Open selection popup for combobox
+                if let Some(handle) = handle {
+                    self.show_combobox_popup(&name, &handle).await?;
+                } else {
+                    self.state.set_status("Cannot edit: no DOM node");
+                }
+            }
+            "textbox" | "textarea" | "textfield" | "searchbox" => {
                 // Open text input prompt for the field
                 if let Some(handle) = handle {
                     self.edit_text_field(&name, &handle, &role).await?;
@@ -1666,6 +2005,211 @@ impl Shell {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Toggle a checkbox or radio button with immediate visual feedback
+    async fn toggle_checkbox(&mut self, handle: &NodeHandle, role: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let session = match self.state.current_tab().session.clone() {
+            Some(s) => s,
+            None => {
+                self.state.set_status("No page loaded");
+                return Ok(());
+            }
+        };
+
+        // Click to toggle
+        session.click_node(handle).await?;
+
+        // Get the new checked state immediately
+        let new_state = session.evaluate_js(r#"
+            (function() {
+                const el = document.activeElement;
+                return el ? el.checked : null;
+            })()
+        "#).await?;
+
+        let checked = new_state.as_bool().unwrap_or(false);
+
+        // Update local node state for immediate feedback
+        if let Some(node) = self.state.current_tab_mut().current_node_mut() {
+            node.state.checked = Some(checked);
+        }
+
+        let marker = if role == "checkbox" {
+            if checked { "[x]" } else { "[ ]" }
+        } else {
+            if checked { "(x)" } else { "( )" }
+        };
+        self.state.set_status(&format!("{} toggled", marker));
+        self.render()?;
+
+        // Background refresh to sync full state
+        self.state.current_tab_mut().needs_tree_refresh = true;
+
+        Ok(())
+    }
+
+    /// Show a selection popup for combobox/listbox
+    async fn show_combobox_popup(&mut self, label: &str, handle: &NodeHandle) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let session = match self.state.current_tab().session.clone() {
+            Some(s) => s,
+            None => {
+                self.state.set_status("No page loaded");
+                return Ok(());
+            }
+        };
+
+        // Focus the element first
+        let _ = session.focus_node(handle).await;
+
+        // Get current value and options
+        let result = session.evaluate_js(r#"
+            (function() {
+                const el = document.activeElement;
+                if (!el) return { value: '', options: [] };
+
+                let options = [];
+                // Handle <select> element
+                if (el.tagName === 'SELECT') {
+                    options = Array.from(el.options).map(o => ({
+                        value: o.value,
+                        text: o.textContent.trim(),
+                        selected: o.selected
+                    }));
+                }
+                // Handle datalist
+                const listId = el.getAttribute('list');
+                if (listId) {
+                    const datalist = document.getElementById(listId);
+                    if (datalist) {
+                        options = Array.from(datalist.options).map(o => ({
+                            value: o.value,
+                            text: o.value,
+                            selected: el.value === o.value
+                        }));
+                    }
+                }
+                // Handle aria listbox
+                const listboxId = el.getAttribute('aria-owns') || el.getAttribute('aria-controls');
+                if (listboxId) {
+                    const listbox = document.getElementById(listboxId);
+                    if (listbox) {
+                        options = Array.from(listbox.querySelectorAll('[role="option"]')).map(o => ({
+                            value: o.textContent.trim(),
+                            text: o.textContent.trim(),
+                            selected: o.getAttribute('aria-selected') === 'true'
+                        }));
+                    }
+                }
+                return { value: el.value || '', options: options };
+            })()
+        "#).await?;
+
+        let options: Vec<(String, String, bool)> = result
+            .get("options")
+            .and_then(|o| o.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|o| {
+                        let value = o.get("value")?.as_str()?.to_string();
+                        let text = o.get("text")?.as_str()?.to_string();
+                        let selected = o.get("selected").and_then(|s| s.as_bool()).unwrap_or(false);
+                        Some((value, text, selected))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if options.is_empty() {
+            // Fall back to text input if no options
+            self.edit_text_field(label, handle, "combobox").await?;
+            return Ok(());
+        }
+
+        // Find currently selected index
+        let mut selected_idx = options.iter().position(|(_, _, sel)| *sel).unwrap_or(0);
+
+        // Show selection popup
+        let prompt_label = if label.is_empty() { "Select" } else { label };
+        self.state.show_input_prompt(&format!("{} (↑↓ select, Enter confirm, Esc cancel): ", prompt_label));
+        self.render_combobox_options(&options, selected_idx)?;
+
+        loop {
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Up => {
+                        if selected_idx > 0 {
+                            selected_idx -= 1;
+                            self.render_combobox_options(&options, selected_idx)?;
+                        }
+                    }
+                    KeyCode::Down => {
+                        if selected_idx + 1 < options.len() {
+                            selected_idx += 1;
+                            self.render_combobox_options(&options, selected_idx)?;
+                        }
+                    }
+                    KeyCode::Enter => {
+                        self.state.hide_input_prompt();
+                        let (value, text, _) = &options[selected_idx];
+
+                        // Set the value
+                        let js = format!(
+                            r#"(function() {{
+                                const el = document.activeElement;
+                                if (el && el.tagName === 'SELECT') {{
+                                    el.value = {};
+                                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                }} else if (el) {{
+                                    el.value = {};
+                                    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                }}
+                            }})()"#,
+                            serde_json::to_string(value).unwrap_or_default(),
+                            serde_json::to_string(value).unwrap_or_default()
+                        );
+                        let _ = session.evaluate_js(&js).await;
+
+                        self.state.set_status(&format!("[▼ {}]", text));
+                        self.state.current_tab_mut().needs_tree_refresh = true;
+                        break;
+                    }
+                    KeyCode::Esc => {
+                        self.state.hide_input_prompt();
+                        self.state.set_status("Cancelled");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn render_combobox_options(&mut self, options: &[(String, String, bool)], selected: usize) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Build display string showing options around selected
+        let start = selected.saturating_sub(2);
+        let end = (start + 5).min(options.len());
+
+        let mut display = String::new();
+        for (i, (_, text, _)) in options.iter().enumerate().skip(start).take(end - start) {
+            let marker = if i == selected { ">" } else { " " };
+            if !display.is_empty() {
+                display.push_str(" | ");
+            }
+            let truncated = if text.len() > 20 {
+                format!("{}...", &text[..17])
+            } else {
+                text.clone()
+            };
+            display.push_str(&format!("{}{}", marker, truncated));
+        }
+
+        self.state.set_input_value(&display);
+        self.render()?;
         Ok(())
     }
 

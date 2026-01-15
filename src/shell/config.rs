@@ -34,6 +34,9 @@ pub struct Config {
     /// Output settings
     pub output: OutputConfig,
 
+    /// Rendering settings
+    pub rendering: RenderingConfig,
+
     /// AI image description settings
     pub ai: AiConfig,
 }
@@ -103,6 +106,7 @@ impl Default for Config {
             navigation_keys: KeyBindings::default_navigation(),
             focus_keys: KeyBindings::default_focus(),
             output: OutputConfig::default(),
+            rendering: RenderingConfig::default(),
             ai: AiConfig::default(),
         }
     }
@@ -291,6 +295,26 @@ impl Default for OutputConfig {
             show_roles: true,
             braille_cells: 40,
             colors: true,
+        }
+    }
+}
+
+/// Rendering configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RenderingConfig {
+    /// Show images in page output
+    pub show_images: bool,
+
+    /// Automatically describe images using AI
+    pub auto_describe: bool,
+}
+
+impl Default for RenderingConfig {
+    fn default() -> Self {
+        Self {
+            show_images: true,
+            auto_describe: false,
         }
     }
 }

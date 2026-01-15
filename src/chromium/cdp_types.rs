@@ -207,6 +207,7 @@ impl CdpAXNode {
                 .and_then(|v| v.as_u64())
                 .map(|n| n as u32),
             contains_role: None, // Populated later by tree.populate_contained_roles()
+            contained_handle: None, // Populated later by tree.populate_contained_roles()
         }
     }
 

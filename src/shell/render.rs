@@ -29,7 +29,7 @@ pub fn render(state: &BrowserState, _config: &Config) -> io::Result<()> {
 
     // Lines 1 to height-3: Content area
     let content_height = height.saturating_sub(3) as usize;
-    let (content_lines, cursor_line) = build_content(state, width, content_height);
+    let (content_lines, cursor_line, cursor_column) = build_content(state, width, content_height);
     frame.extend(content_lines);
 
     // Line height-2: Input prompt or empty
@@ -61,7 +61,8 @@ pub fn render(state: &BrowserState, _config: &Config) -> io::Result<()> {
         ((prompt_len + cursor_char_pos) as u16, height - 2)
     } else {
         let safe_cursor_line = cursor_line.max(1).min(height - 2);
-        (0, safe_cursor_line)
+        // Position cursor at cursor_x on the current line
+        (cursor_column.min(width as u16 - 1), safe_cursor_line)
     };
 
     execute!(stdout, cursor::Show, MoveTo(cursor_pos.0, cursor_pos.1))?;
@@ -151,11 +152,12 @@ fn build_status_bar(state: &BrowserState, width: usize) -> String {
     )
 }
 
-/// Build content lines (returns lines and cursor screen line)
-fn build_content(state: &BrowserState, width: usize, height: usize) -> (Vec<String>, u16) {
+/// Build content lines (returns lines, cursor screen line, and cursor column)
+fn build_content(state: &BrowserState, width: usize, height: usize) -> (Vec<String>, u16, u16) {
     let tab = state.current_tab();
     let mut lines: Vec<String> = Vec::with_capacity(height);
     let mut cursor_screen_line: u16 = 1;
+    let mut cursor_column: u16 = 0;
     let mut cursor_found = false;
     let mut screen_line_idx: usize = 0;
     let mut node_idx = tab.scroll_offset;
@@ -167,6 +169,7 @@ fn build_content(state: &BrowserState, width: usize, height: usize) -> (Vec<Stri
 
             if is_current && !cursor_found {
                 cursor_screen_line = (screen_line_idx + 1) as u16;
+                cursor_column = tab.cursor_x as u16;
                 cursor_found = true;
             }
 
@@ -185,7 +188,11 @@ fn build_content(state: &BrowserState, width: usize, height: usize) -> (Vec<Stri
                 let indented_len = indented_line.chars().count();
                 let padding = " ".repeat(width.saturating_sub(indented_len));
 
-                let line = if is_current {
+                let line = if is_current && wrap_idx == 0 {
+                    // Current line: highlight and show cursor position
+                    format!("\x1b[44m\x1b[37m{}{}\x1b[0m", indented_line, padding)
+                } else if is_current {
+                    // Wrapped continuation of current line
                     format!("\x1b[44m\x1b[37m{}{}\x1b[0m", indented_line, padding)
                 } else {
                     format!("{}{}{}\x1b[0m", color_code, indented_line, padding)
@@ -202,7 +209,7 @@ fn build_content(state: &BrowserState, width: usize, height: usize) -> (Vec<Stri
         }
     }
 
-    (lines, cursor_screen_line)
+    (lines, cursor_screen_line, cursor_column)
 }
 
 /// Get ANSI color code for a role
@@ -287,6 +294,11 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// Public interface to format_node for getting line width
+pub fn format_node_public(node: &crate::accessibility::AXNode) -> (String, String) {
+    format_node(node)
+}
+
 fn format_node(node: &crate::accessibility::AXNode) -> (String, String) {
     use crate::accessibility::Role;
 
@@ -307,7 +319,7 @@ fn format_node(node: &crate::accessibility::AXNode) -> (String, String) {
             if let Some(ref contained) = node.contains_role {
                 match contained {
                     Role::Link => (format!("{}[", prefix), format!("{}]", name)),
-                    Role::Button => (format!("{}<", prefix), format!("{}>", name)),
+                    Role::Button => (format!("{}< ", prefix), format!("{} >", name)),
                     _ => (prefix, name.to_string()),
                 }
             } else {
@@ -329,10 +341,28 @@ fn format_node(node: &crate::accessibility::AXNode) -> (String, String) {
                 ("[".to_string(), format!("{}]", name))
             }
         }
-        "button" => ("<".to_string(), format!("{}>", name)),
-        "checkbox" => ("[ ] ".to_string(), name.to_string()),
-        "radiobutton" => ("( ) ".to_string(), name.to_string()),
-        "textbox" | "textarea" | "textfield" => ("[____] ".to_string(), name.to_string()),
+        "button" => ("< ".to_string(), format!("{} >", name)),
+        "checkbox" => {
+            let marker = if node.state.checked == Some(true) { "[x] " } else { "[ ] " };
+            (marker.to_string(), name.to_string())
+        }
+        "radiobutton" => {
+            let marker = if node.state.checked == Some(true) { "(x) " } else { "( ) " };
+            (marker.to_string(), name.to_string())
+        }
+        "combobox" | "listbox" => {
+            // Show dropdown marker with current value
+            let value = if name.is_empty() { "Select..." } else { name };
+            ("-- [".to_string(), format!("{}] --", value))
+        }
+        "textbox" | "textarea" | "textfield" => {
+            // Show editable field with value or placeholder
+            if name.is_empty() {
+                ("-- ".to_string(), "_____ --".to_string())
+            } else {
+                ("-- ".to_string(), format!("{} --", name))
+            }
+        }
         "listitem" => {
             // Calculate indent based on nesting level
             let indent = "  ".repeat(node.level as usize);
@@ -348,14 +378,14 @@ fn format_node(node: &crate::accessibility::AXNode) -> (String, String) {
             if let Some(ref contained) = node.contains_role {
                 match contained {
                     Role::Link => (format!("{}{}[", indent, marker), format!("{}]", name)),
-                    Role::Button => (format!("{}{}<", indent, marker), format!("{}>", name)),
+                    Role::Button => (format!("{}{}< ", indent, marker), format!("{} >", name)),
                     _ => (format!("{}{}", indent, marker), name.to_string()),
                 }
             } else {
                 (format!("{}{}", indent, marker), name.to_string())
             }
         }
-        "image" => ("[IMG: ".to_string(), format!("{}]", name)),
+        "image" => ("(Image: ".to_string(), format!("{})", name)),
         "table" => ("TABLE: ".to_string(), name.to_string()),
         "navigation" => {
             let label = if name.is_empty() { "Navigation" } else { name };

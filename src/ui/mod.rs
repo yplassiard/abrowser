@@ -2,6 +2,7 @@
 //!
 //! Uses HTML/JS for rich UI, served locally and displayed in a browser tab.
 
+pub mod help;
 pub mod options;
 
 use std::collections::HashMap;

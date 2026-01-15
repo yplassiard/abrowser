@@ -130,6 +130,9 @@ pub struct AXNode {
     /// Secondary role when this node effectively contains another role
     /// e.g., a heading that contains a link: display as "# [link text]"
     pub contains_role: Option<Role>,
+
+    /// Handle of the contained interactive element (for activation when h_index > 0)
+    pub contained_handle: Option<NodeHandle>,
 }
 
 impl AXNode {
@@ -243,6 +246,35 @@ impl AXNode {
             Role::Search => Some("search"),
             Role::Form => Some("form"),
             _ => None,
+        }
+    }
+
+    /// Count clickable elements within this node
+    /// Returns 1 if the node itself is clickable, 2 if it contains another clickable element
+    pub fn clickable_children_count(&self) -> usize {
+        // If this node contains a link or button, there are 2 clickable targets
+        if let Some(ref contained) = self.contains_role {
+            match contained {
+                Role::Link | Role::Button => 2,
+                _ => 1,
+            }
+        } else {
+            1
+        }
+    }
+
+    /// Check if the node or its contained element at the given index is clickable
+    pub fn is_clickable_at(&self, h_index: usize) -> bool {
+        if h_index == 0 {
+            // First position is always the main element (if interactive)
+            self.is_interactive()
+        } else if h_index == 1 {
+            // Second position is the contained element (if any)
+            self.contains_role.as_ref().map_or(false, |r| {
+                matches!(r, Role::Link | Role::Button)
+            })
+        } else {
+            false
         }
     }
 }

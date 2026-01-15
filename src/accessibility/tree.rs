@@ -109,6 +109,8 @@ impl AXTree {
 
     /// Find headings/list items that contain interactive elements and set their contains_role
     fn populate_contained_roles(&mut self) {
+        use crate::backend::NodeHandle;
+
         // Collect IDs and names of headings
         let headings: Vec<(String, String)> = self
             .nodes
@@ -125,29 +127,29 @@ impl AXTree {
             .map(|n| n.id.clone())
             .collect();
 
-        let mut updates: Vec<(String, Role, Option<String>)> = Vec::new();
+        let mut updates: Vec<(String, Role, Option<String>, Option<NodeHandle>)> = Vec::new();
 
         // For each heading, check for contained interactive elements
         for (id, name) in &headings {
             if let Some(node) = self.nodes.get(id) {
-                if let Some(role) = self.find_contained_role_recursive(node, name) {
-                    updates.push((id.clone(), role, None));
+                if let Some((role, handle)) = self.find_contained_role_recursive(node, name) {
+                    updates.push((id.clone(), role, None, handle));
                 }
             }
         }
 
-        // For each list item, check if it contains only a link
+        // For each list item, check if it contains a link/button
         for id in &list_items {
-            if let Some((role, name)) = self.find_list_item_link(id) {
-                crate::utils::log::log(&format!("[DEBUG] List item {} contains {:?} with name: {}", id, role, name));
-                updates.push((id.clone(), role, Some(name)));
+            if let Some((role, name, handle)) = self.find_list_item_link(id) {
+                updates.push((id.clone(), role, Some(name), handle));
             }
         }
 
         // Apply updates
-        for (id, role, name_opt) in updates {
+        for (id, role, name_opt, handle_opt) in updates {
             if let Some(node) = self.nodes.get_mut(&id) {
                 node.contains_role = Some(role);
+                node.contained_handle = handle_opt;
                 if let Some(name) = name_opt {
                     // Copy the link name to the list item
                     node.name = name;
@@ -159,49 +161,38 @@ impl AXTree {
         self.calculate_list_levels();
     }
 
-    /// Check if a list item contains only a link (no other significant content)
-    fn find_list_item_link(&self, id: &str) -> Option<(Role, String)> {
+    /// Check if a list item contains a link or button (primary interactive child)
+    fn find_list_item_link(&self, id: &str) -> Option<(Role, String, Option<crate::backend::NodeHandle>)> {
         let node = self.nodes.get(id)?;
 
-        // Find all interesting children
-        let mut link_child: Option<&AXNode> = None;
-        let mut has_other_content = false;
-
+        // Find first link or button child
         for child_id in &node.child_ids {
             if let Some(child) = self.nodes.get(child_id) {
                 if matches!(child.role, Role::Link) {
-                    link_child = Some(child);
-                } else if child.is_interesting() && !matches!(child.role, Role::Generic | Role::Group) {
-                    // Has other interesting content besides links
-                    has_other_content = true;
-                } else {
-                    // Recurse into non-interesting containers to find links
-                    if let Some((role, name)) = self.find_nested_link(child) {
-                        if link_child.is_none() {
-                            link_child = self.nodes.get(&child.id);
-                            // Actually we need the link node, not the container
-                            return Some((role, name));
-                        }
-                    }
+                    return Some((Role::Link, child.name.clone(), child.handle.clone()));
                 }
-            }
-        }
-
-        if let Some(link) = link_child {
-            if !has_other_content {
-                return Some((Role::Link, link.name.clone()));
+                if matches!(child.role, Role::Button) {
+                    return Some((Role::Button, child.name.clone(), child.handle.clone()));
+                }
+                // Recurse into non-interesting containers to find links/buttons
+                if let Some(result) = self.find_nested_link(child) {
+                    return Some(result);
+                }
             }
         }
 
         None
     }
 
-    /// Recursively find a link in a container node
-    fn find_nested_link(&self, node: &AXNode) -> Option<(Role, String)> {
+    /// Recursively find a link or button in a container node
+    fn find_nested_link(&self, node: &AXNode) -> Option<(Role, String, Option<crate::backend::NodeHandle>)> {
         for child_id in &node.child_ids {
             if let Some(child) = self.nodes.get(child_id) {
                 if matches!(child.role, Role::Link) {
-                    return Some((Role::Link, child.name.clone()));
+                    return Some((Role::Link, child.name.clone(), child.handle.clone()));
+                }
+                if matches!(child.role, Role::Button) {
+                    return Some((Role::Button, child.name.clone(), child.handle.clone()));
                 }
                 if let Some(result) = self.find_nested_link(child) {
                     return Some(result);
@@ -265,6 +256,11 @@ impl AXTree {
     /// Get a node by ID
     pub fn get(&self, id: &str) -> Option<&AXNode> {
         self.nodes.get(id)
+    }
+
+    /// Get a mutable reference to a node by ID
+    pub fn get_mut(&mut self, id: &str) -> Option<&mut AXNode> {
+        self.nodes.get_mut(id)
     }
 
     /// Get the focused node
@@ -360,23 +356,19 @@ impl AXTree {
     /// Check if a node contains an interactive child with similar name
     /// Returns the role of the contained interactive element if found
     pub fn find_contained_interactive_role(&self, node: &AXNode) -> Option<Role> {
-        self.find_contained_role_recursive(node, &node.name)
+        self.find_contained_role_recursive(node, &node.name).map(|(role, _)| role)
     }
 
-    fn find_contained_role_recursive(&self, node: &AXNode, parent_name: &str) -> Option<Role> {
+    fn find_contained_role_recursive(&self, node: &AXNode, _parent_name: &str) -> Option<(Role, Option<crate::backend::NodeHandle>)> {
         for child_id in &node.child_ids {
             if let Some(child) = self.nodes.get(child_id) {
-                // Check if this child is interactive with similar name
-                if child.is_interactive() {
-                    let pname = parent_name.trim();
-                    let cname = child.name.trim();
-                    if !cname.is_empty() && (pname.contains(cname) || cname.contains(pname)) {
-                        return Some(child.role.clone());
-                    }
+                // Check if this child is an interactive link or button
+                if matches!(child.role, Role::Link | Role::Button) {
+                    return Some((child.role.clone(), child.handle.clone()));
                 }
                 // Recurse into children
-                if let Some(role) = self.find_contained_role_recursive(child, parent_name) {
-                    return Some(role);
+                if let Some(result) = self.find_contained_role_recursive(child, _parent_name) {
+                    return Some(result);
                 }
             }
         }

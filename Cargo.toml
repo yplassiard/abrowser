@@ -1,6 +1,6 @@
 [package]
 name = "abrowser"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Accessible terminal browser with screen reader and braille support"
 license = "MIT"

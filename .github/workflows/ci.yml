@@ -30,7 +30,7 @@ jobs:
             llvm-dev
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Build
         run: cargo build --release
@@ -101,7 +101,7 @@ jobs:
             llvm-dev
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Build release binary
         run: cargo build --release
@@ -230,7 +230,7 @@ jobs:
           brew install cmake llvm
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Build release binary
         env:
@@ -276,7 +276,7 @@ jobs:
           brew install cmake llvm
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Build release binary
         env:

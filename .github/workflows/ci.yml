@@ -1,0 +1,345 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Build check on Debian (runs on every push/PR)
+  build-check:
+    name: Build Check (Debian)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            pkg-config \
+            libssl-dev \
+            libclang-dev \
+            llvm-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Run tests
+        run: cargo test --release
+
+  # Auto-create tag from Cargo.toml version (only on main branch push)
+  auto-tag:
+    name: Auto Tag Release
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: build-check
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version from Cargo.toml
+        id: cargo_version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Cargo.toml version: ${VERSION}"
+
+      - name: Check if tag exists
+        id: tag_check
+        run: |
+          VERSION=${{ steps.cargo_version.outputs.VERSION }}
+          if git rev-parse "v${VERSION}" >/dev/null 2>&1; then
+            echo "EXISTS=true" >> $GITHUB_OUTPUT
+            echo "Tag v${VERSION} already exists"
+          else
+            echo "EXISTS=false" >> $GITHUB_OUTPUT
+            echo "Tag v${VERSION} does not exist"
+          fi
+
+      - name: Create and push tag
+        if: steps.tag_check.outputs.EXISTS == 'false'
+        run: |
+          VERSION=${{ steps.cargo_version.outputs.VERSION }}
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${VERSION}" -m "Release v${VERSION}"
+          git push origin "v${VERSION}"
+          echo "Created and pushed tag v${VERSION}"
+
+  # Release jobs (only run on version tags)
+  build-debian:
+    name: Build Debian Package
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            pkg-config \
+            libssl-dev \
+            libclang-dev \
+            llvm-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Create .deb package
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          ARCH=$(dpkg --print-architecture)
+          PKG_NAME="abrowser_${VERSION}_${ARCH}"
+          PKG_DIR="dist/${PKG_NAME}"
+
+          mkdir -p "${PKG_DIR}/DEBIAN"
+          mkdir -p "${PKG_DIR}/usr/bin"
+
+          cat > "${PKG_DIR}/DEBIAN/control" << EOF
+          Package: abrowser
+          Version: ${VERSION}
+          Section: web
+          Priority: optional
+          Architecture: ${ARCH}
+          Depends: chromium | chromium-browser | google-chrome-stable
+          Maintainer: abrowser
+          Description: Accessible terminal web browser
+           A terminal-based accessible web browser with screen reader
+           and braille support.
+          EOF
+
+          cp target/release/abrowser "${PKG_DIR}/usr/bin/"
+          chmod 755 "${PKG_DIR}/usr/bin/abrowser"
+
+          dpkg-deb --build "${PKG_DIR}" "dist/${PKG_NAME}.deb"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: debian-package
+          path: dist/*.deb
+
+  build-fedora:
+    name: Build Fedora Package
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-check
+    container:
+      image: fedora:42
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          dnf install -y \
+            rust \
+            cargo \
+            gcc \
+            gcc-c++ \
+            cmake \
+            make \
+            openssl-devel \
+            pkg-config \
+            clang-devel \
+            llvm-devel \
+            rpm-build
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Create .rpm package
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          ARCH=$(uname -m)
+
+          mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+
+          cat > ~/rpmbuild/SPECS/abrowser.spec << EOF
+          Name:           abrowser
+          Version:        ${VERSION}
+          Release:        1%{?dist}
+          Summary:        Accessible terminal web browser
+          License:        MIT
+          URL:            https://github.com/user/abrowser
+
+          Requires:       chromium
+
+          %description
+          A terminal-based accessible web browser with screen reader
+          and braille support.
+
+          %install
+          mkdir -p %{buildroot}/usr/bin
+          cp ${GITHUB_WORKSPACE}/target/release/abrowser %{buildroot}/usr/bin/
+          chmod 755 %{buildroot}/usr/bin/abrowser
+
+          %files
+          /usr/bin/abrowser
+          EOF
+
+          rpmbuild -bb ~/rpmbuild/SPECS/abrowser.spec
+
+          mkdir -p dist
+          cp ~/rpmbuild/RPMS/*/*.rpm dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fedora-package
+          path: dist/*.rpm
+
+  build-macos-arm64:
+    name: Build macOS Package (Apple Silicon)
+    runs-on: macos-14
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install cmake llvm
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Build release binary
+        env:
+          LIBCLANG_PATH: /opt/homebrew/opt/llvm/lib
+        run: cargo build --release
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Create .pkg package
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          PKG_NAME="abrowser-${VERSION}-macos-arm64"
+
+          mkdir -p pkg_root/usr/local/bin
+          cp target/release/abrowser pkg_root/usr/local/bin/
+          chmod 755 pkg_root/usr/local/bin/abrowser
+
+          pkgbuild \
+            --root pkg_root \
+            --identifier com.abrowser.pkg \
+            --version "${VERSION}" \
+            --install-location / \
+            "dist/${PKG_NAME}.pkg"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64-package
+          path: dist/*.pkg
+
+  build-macos-x64:
+    name: Build macOS Package (Intel)
+    runs-on: macos-13
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install cmake llvm
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Build release binary
+        env:
+          LIBCLANG_PATH: /usr/local/opt/llvm/lib
+        run: cargo build --release
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Create .pkg package
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          PKG_NAME="abrowser-${VERSION}-macos-x64"
+
+          mkdir -p pkg_root/usr/local/bin
+          cp target/release/abrowser pkg_root/usr/local/bin/
+          chmod 755 pkg_root/usr/local/bin/abrowser
+
+          pkgbuild \
+            --root pkg_root \
+            --identifier com.abrowser.pkg \
+            --version "${VERSION}" \
+            --install-location / \
+            "dist/${PKG_NAME}.pkg"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-x64-package
+          path: dist/*.pkg
+
+  # Create GitHub Release with all packages
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-debian, build-fedora, build-macos-arm64, build-macos-x64]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: List artifacts
+        run: find artifacts -type f
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ steps.version.outputs.VERSION }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            artifacts/**/*.deb
+            artifacts/**/*.rpm
+            artifacts/**/*.pkg

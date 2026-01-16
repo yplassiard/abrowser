@@ -1,0 +1,30 @@
+# Dockerfile for testing abrowser build on Fedora 42
+FROM fedora:42
+
+# Install build dependencies
+RUN dnf update -y && dnf install -y \
+    rust \
+    cargo \
+    gcc \
+    gcc-c++ \
+    cmake \
+    make \
+    openssl-devel \
+    pkg-config \
+    git \
+    clang-devel \
+    llvm-devel \
+    && dnf clean all
+
+# Set working directory
+WORKDIR /build
+
+# Copy project files
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+
+# Build the project
+RUN cargo build --release
+
+# Verify binary was created
+RUN ls -la target/release/abrowser
